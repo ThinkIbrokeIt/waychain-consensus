@@ -316,14 +316,13 @@ func RunP2PDemo() {
 	time.Sleep(200 * time.Millisecond)
 
 	// Check that all nodes received it
-	for i, node := range nodes {
+	for _, node := range nodes {
 		select {
 		case received := <-node.Incoming:
 			fmt.Printf("  ✅ %s received: %s\n", node.ID, string(received.Payload))
 		default:
 			fmt.Printf("  ⚠️  %s: no messages\n", node.ID)
 		}
-		_ = i
 	}
 
 	fmt.Println()
