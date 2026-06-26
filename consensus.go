@@ -1,199 +1,204 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"math/big"
+	"sort"
+	"sync"
 	"time"
 )
 
-// ConsensusState tracks a round of BFT consensus
-type ConsensusState struct {
-	Height      uint64
-	Round       uint32
-	Validators  *ValidatorSet
-	Proposer    ValidatorID
-	Proposal    *BlockHeader
+// ══════════════════════════════════════════════════════════════════════
+// BFT Consensus Engine — CometBFT-derived
+// Propose → Prevote → Precommit → Commit
+// Instant finality with 2/3+ voting power
+// ══════════════════════════════════════════════════════════════════════
 
-	Prevotes    map[ValidatorID][32]byte  // validator → block hash
-	Precommits  map[ValidatorID][32]byte  // validator → block hash
-	NilVotes    map[ValidatorID]bool      // validators who sent nil prevote
+// Consensus phase types
+type ConsensusPhase byte
 
-	StartedAt   time.Time
-	Committed   uint64  // blocks committed
-}
+const (
+	PhasePropose    ConsensusPhase = iota
+	PhasePrevote
+	PhasePrecommit
+	PhaseCommit
+	PhaseTimeout
+)
 
-// NewConsensusState creates a new consensus instance
-func NewConsensusState(valSet *ValidatorSet) *ConsensusState {
-	return &ConsensusState{
-		Height:     1,
-		Round:      0,
-		Validators: valSet,
-		Prevotes:   make(map[ValidatorID][32]byte),
-		Precommits: make(map[ValidatorID][32]byte),
-		NilVotes:   make(map[ValidatorID]bool),
+func (p ConsensusPhase) String() string {
+	switch p {
+	case PhasePropose:
+		return "PROPOSE"
+	case PhasePrevote:
+		return "PREVOTE"
+	case PhasePrecommit:
+		return "PRECOMMIT"
+	case PhaseCommit:
+		return "COMMIT"
+	case PhaseTimeout:
+		return "TIMEOUT"
+	default:
+		return "UNKNOWN"
 	}
 }
 
-// StartRound begins a new consensus round
-func (cs *ConsensusState) StartRound() {
-	cs.Proposer = cs.Validators.SelectProposer(cs.Height)
-	cs.Round = 0
-	cs.Prevotes = make(map[ValidatorID][32]byte)
-	cs.Precommits = make(map[ValidatorID][32]byte)
-	cs.NilVotes = make(map[ValidatorID]bool)
-	cs.Proposal = nil
-	cs.StartedAt = time.Now()
+// Consensus-specific constants (beyond MaxValidators in types.go)
+const (
+	ConsensusTimeout         = 3 * time.Second  // Time to wait for 2/3+ commits
+	MinValidatorStake        = 10000            // Minimum self-bond
+	EpochLength              = 10000            // Blocks per epoch
+	InstantFinalityThreshold = 2.0 / 3.0        // 2/3+ for finality
+)
+
+// ConsensusRound tracks the state of a single height's consensus
+type ConsensusRound struct {
+	Height       uint64
+	Round        byte
+	Phase        ConsensusPhase
+	Proposer     *ValidatorID
+	Block        *BlockWithTx
+	Votes        map[string]Vote // validatorID → Vote
+	PrevoteSet   map[[32]byte]int // blockHash → vote count
+	PrecommitSet map[[32]byte]int // blockHash → vote count
+	StartedAt    time.Time
+	mu           sync.RWMutex
 }
 
-// Propose creates a block proposal from the proposer
-func (cs *ConsensusState) Propose(proposer ValidatorID) *BlockHeader {
-	if proposer != cs.Proposer {
+// ConsensusEngine manages the BFT consensus process
+type ConsensusEngine struct {
+	CurrentHeight uint64
+	CurrentRound  byte
+	Validators     *ValidatorSet
+	ActiveSet     []*ValidatorID // Current epoch's active validators
+	VotingPower   map[string]uint64 // validatorID → voting power (equal for active)
+	TotalPower    uint64
+	Blocks        map[uint64]BlockWithTx // height → finalized block
+	RandomSeed    [32]byte
+	mu            sync.RWMutex
+}
+
+// NewConsensusEngine creates a new consensus engine
+func NewConsensusEngine(validators *ValidatorSet) *ConsensusEngine {
+	engine := &ConsensusEngine{
+		CurrentHeight: 0,
+		CurrentRound:  0,
+		Validators:     validators,
+		Blocks:        make(map[uint64]BlockWithTx),
+		VotingPower:   make(map[string]uint64),
+	}
+	engine.selectNewEpoch()
+	return engine
+}
+
+// selectNewEpoch selects the active validator set via sqrt-weighted lottery
+func (ce *ConsensusEngine) selectNewEpoch() {
+	registered := ce.Validators.IDs
+	if len(registered) == 0 {
+		ce.ActiveSet = nil
+		ce.TotalPower = 0
+		return
+	}
+
+	// Sqrt-weighted lottery selection
+	type weightedVal struct {
+		id     ValidatorID
+		weight float64
+	}
+
+	var weighted []weightedVal
+	for _, v := range registered {
+		weight := sqrtWeighted(float64(ce.Validators.Stakes[v]))
+		weighted = append(weighted, weightedVal{id: v, weight: weight})
+	}
+
+	// Sort by weight (descending) for deterministic selection
+	sort.Slice(weighted, func(i, j int) bool {
+		return weighted[i].weight > weighted[j].weight
+	})
+
+	// Select top N
+	n := MaxValidators
+	if len(weighted) < n {
+		n = len(weighted)
+	}
+
+	ce.ActiveSet = make([]*ValidatorID, n)
+	ce.VotingPower = make(map[string]uint64)
+	ce.TotalPower = 0
+
+	// All active validators get EQUAL voting power (1 each)
+	for i := 0; i < n; i++ {
+		ce.ActiveSet[i] = &weighted[i].id
+		ce.VotingPower[weighted[i].id.String()] = 1
+		ce.TotalPower++
+	}
+
+	// Generate new random seed for this epoch
+	ce.RandomSeed = sha256.Sum256([]byte(fmt.Sprintf("epoch:%d", ce.CurrentHeight)))
+}
+
+// SelectProposer deterministically selects the next block proposer
+func (ce *ConsensusEngine) SelectProposer(height uint64) *ValidatorID {
+	if len(ce.ActiveSet) == 0 {
 		return nil
 	}
 
-	var prevHash [32]byte
-	if cs.Committed > 0 {
-		prevHash = [32]byte{byte(cs.Height - 1)}
-	}
+	// Deterministic: seed = hash(randomSeed, height)
+	seedInput := append(ce.RandomSeed[:], []byte(fmt.Sprintf(":%d", height))...)
+	hash := sha256.Sum256(seedInput)
 
-	block := &BlockHeader{
-		Height:    cs.Height,
-		Round:     cs.Round,
-		Proposer:  proposer,
-		Timestamp: time.Now().Unix(),
-		PrevHash:  prevHash,
-	}
-
-	cs.Proposal = block
-	return block
+	// Use hash to select proposer index
+	index := new(big.Int).SetBytes(hash[:]).Uint64() % uint64(len(ce.ActiveSet))
+	return ce.ActiveSet[index]
 }
 
-// Prevote submits a prevote for a block
-func (cs *ConsensusState) Prevote(validator ValidatorID, blockHash [32]byte) {
-	cs.Prevotes[validator] = blockHash
-}
-
-// Precommit submits a precommit for a block
-func (cs *ConsensusState) Precommit(validator ValidatorID, blockHash [32]byte) {
-	cs.Precommits[validator] = blockHash
-}
-
-// HasTwoThirdsPrevotes checks if a block has 2/3+ prevotes
-func (cs *ConsensusState) HasTwoThirdsPrevotes(blockHash [32]byte) bool {
-	totalActive := cs.Validators.Count()
-	if totalActive == 0 {
-		return false
-	}
-	count := 0
-	for _, hash := range cs.Prevotes {
-		if hash == blockHash {
-			count++
+// GetQuorumHeight returns the block height that 2/3+ voting power last committed
+func (ce *ConsensusEngine) GetQuorumHeight() uint64 {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	var max uint64
+	for h := range ce.Blocks {
+		if h > max {
+			max = h
 		}
 	}
-	return float64(count)/float64(totalActive) >= 2.0/3.0
+	return max
 }
 
-// HasTwoThirdsPrecommits checks if a block has 2/3+ precommits
-func (cs *ConsensusState) HasTwoThirdsPrecommits(blockHash [32]byte) bool {
-	totalActive := cs.Validators.Count()
-	if totalActive == 0 {
-		return false
-	}
-	count := 0
-	for _, hash := range cs.Precommits {
-		if hash == blockHash {
-			count++
+// IsValidatorActive checks if a validator is in the current active set
+func (ce *ConsensusEngine) IsValidatorActive(id ValidatorID) bool {
+	for _, v := range ce.ActiveSet {
+		if *v == id {
+			return true
 		}
 	}
-	return float64(count)/float64(totalActive) >= 2.0/3.0
-}
-
-// Commit finalizes a block and advances to the next height
-func (cs *ConsensusState) Commit() *BlockHeader {
-	if cs.Proposal == nil {
-		return nil
-	}
-	cs.Committed++
-	block := cs.Proposal
-	cs.Height++
-	cs.Round = 0
-	cs.Prevotes = make(map[ValidatorID][32]byte)
-	cs.Precommits = make(map[ValidatorID][32]byte)
-	cs.NilVotes = make(map[ValidatorID]bool)
-	cs.Proposal = nil
-	return block
-}
-
-// AdvanceToNextRound increments the round and resets votes
-func (cs *ConsensusState) AdvanceToNextRound() {
-	cs.Round++
-	cs.Prevotes = make(map[ValidatorID][32]byte)
-	cs.Precommits = make(map[ValidatorID][32]byte)
-	cs.NilVotes = make(map[ValidatorID]bool)
-}
-
-// RunConsensusRound runs one complete consensus round
-// Returns true if a block was committed
-func (cs *ConsensusState) RunConsensusRound() bool {
-	validators := cs.Validators.IDs
-	activeCount := len(validators)
-	if activeCount == 0 {
-		return false
-	}
-
-	// Step 1: Proposer proposes
-	proposer := cs.Proposer
-	block := cs.Propose(proposer)
-	if block == nil {
-		fmt.Printf("  ⚠️  Proposer %s failed to propose\n", proposer.String())
-		cs.AdvanceToNextRound()
-		return false
-	}
-
-	blockHash := block.Hash()
-	fmt.Printf("  📝 Proposer %s proposes block #%d (hash: %x...)\n",
-		proposer.String(), cs.Height, blockHash[:4])
-
-	// Step 2: Validators prevote
-	for _, vid := range validators {
-		if vid == proposer {
-			// Proposer votes for their own block
-			cs.Prevote(vid, blockHash)
-		} else {
-			// Others vote for the proposed block (simplified — no malicious actors)
-			cs.Prevote(vid, blockHash)
-		}
-	}
-	fmt.Printf("  ✅ %d validators prevoted\n", len(cs.Prevotes))
-
-	// Step 3: Check if we have 2/3+ prevotes
-	if !cs.HasTwoThirdsPrevotes(blockHash) {
-		fmt.Printf("  ⚠️  Not enough prevotes (have %d, need 2/3)\n", len(cs.Prevotes))
-		cs.AdvanceToNextRound()
-		return false
-	}
-	fmt.Printf("  🔒 2/3+ prevotes achieved\n")
-
-	// Step 4: Validators precommit
-	for _, vid := range validators {
-		cs.Precommit(vid, blockHash)
-	}
-	fmt.Printf("  ✅ %d validators precommitted\n", len(cs.Precommits))
-
-	// Step 5: Check if we have 2/3+ precommits
-	if !cs.HasTwoThirdsPrecommits(blockHash) {
-		fmt.Printf("  ⚠️  Not enough precommits\n")
-		cs.AdvanceToNextRound()
-		return false
-	}
-	fmt.Printf("  🔒 2/3+ precommits achieved\n")
-
-	// Step 6: Commit!
-	committed := cs.Commit()
-	if committed != nil {
-		fmt.Printf("  🎉 Block #%d COMMITTED (proposer: %s | timestamp: %d | hash: %x...)\n",
-			committed.Height, committed.Proposer.String(), committed.Timestamp, blockHash[:4])
-		return true
-	}
-
 	return false
+}
+
+// FinalizeBlock records a finalized block (2/3+ commits achieved)
+func (ce *ConsensusEngine) FinalizeBlock(block *BlockWithTx) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+	ce.Blocks[block.Height] = *block
+	if block.Height > ce.CurrentHeight {
+		ce.CurrentHeight = block.Height
+	}
+}
+
+// NewConsensusState creates a new consensus engine (alias for backward compat)
+func NewConsensusState(vs *ValidatorSet) *ConsensusEngine {
+	return NewConsensusEngine(vs)
+}
+
+// sqrtWeighted returns the square root of x
+func sqrtWeighted(x float64) float64 {
+	if x <= 0 {
+		return 0
+	}
+	z := x
+	for i := 0; i < 10; i++ {
+		z = (z + x/z) / 2
+	}
+	return z
 }
