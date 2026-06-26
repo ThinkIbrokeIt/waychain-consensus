@@ -94,12 +94,13 @@ func (b *BlockWithTx) ComputeHash() [32]byte {
 
 // Chain connects the consensus engine to the EVM execution layer
 type Chain struct {
-	State  *evm.StateDB
-	Pool   *TxPool
-	EVM    *evm.EVM
-	Blocks []*BlockWithTx
-	Height uint64
-	Store  *store.Store // persistent storage (nil = in-memory only)
+	State      *evm.StateDB
+	Pool       *TxPool
+	EVM        *evm.EVM
+	Blocks     []*BlockWithTx
+	Height     uint64
+	Store      *store.Store // persistent storage (nil = in-memory only)
+	Staking    *ProgressiveStaking
 
 	// Callbacks for real-time event streaming
 	OnNewBlock func(block *BlockWithTx)
@@ -115,11 +116,12 @@ func NewChain() *Chain {
 	evmEngine := evm.NewEVM(state, evm.ConsensusLane, 1, uint64(time.Now().Unix()), 10008, 30_000_000, "")
 
 	chain := &Chain{
-		State:  state,
-		Pool:   NewTxPool(),
-		EVM:    evmEngine,
-		Blocks: make([]*BlockWithTx, 0),
-		Height: 0,
+		State:   state,
+		Pool:    NewTxPool(),
+		EVM:     evmEngine,
+		Blocks:  make([]*BlockWithTx, 0),
+		Height:  0,
+		Staking: NewProgressiveStaking(100000), // 100K tokens/epoch reward pool
 	}
 
 	// Initialize precompile state at genesis
@@ -450,6 +452,17 @@ func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 	}
 	block.Hash = block.ComputeHash()
 	c.Blocks = append(c.Blocks, block)
+
+	// Distribute staking rewards for this block
+	if c.Staking != nil && c.Staking.BlockRewardLimit > 0 {
+		rewards := c.Staking.DistributeBlockReward(c.Height)
+		for id, amount := range rewards {
+			if amount > 0 {
+				acc := c.State.GetOrCreateAccount(id.String())
+				acc.Balance.Add(acc.Balance, new(big.Int).SetUint64(amount))
+			}
+		}
+	}
 
 	// Notify subscribers about the new block
 	if c.OnNewBlock != nil {
