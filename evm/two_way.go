@@ -130,7 +130,7 @@ func twoWayDeposit(input []byte, caller string, state *StateDB, blockNum uint64)
 	collAddr := make([]byte, 20)
 	copy(collAddr, input[36:56])
 	
-	// Extract collateral identifier (trim trailing zeros)
+	// Extract collateral identifier (trim trailing zeros for short names)
 	collateralID := string(trimRightZeros(collAddr))
 	collAmount := readBigInt(readSlot(input, 56))
 	
@@ -212,7 +212,8 @@ func twoWayWithdraw(input []byte, caller string, state *StateDB, blockNum uint64
 	vaultID := input[4:36]
 	collAddr := make([]byte, 20)
 	copy(collAddr, input[36:56])
-	collateralID := string(collAddr)
+	// Extract collateral identifier (trim trailing zeros for short names)
+	collateralID := string(trimRightZeros(collAddr))
 	collAmount := readBigInt(readSlot(input, 56))
 
 	// Get vault state
@@ -298,11 +299,11 @@ func twoWayLiquidate(input []byte, caller string, state *StateDB, blockNum uint6
 	vaultID := input[4:36]
 
 	// Get vault state
-	collaterals := getVaultCollaterals(vaultID, state)
+	getVaultCollaterals(vaultID, state) // populate collateral data
 	vaultDebt := getVaultDebt(vaultID, state)
 
 	// Check if vault is below liquidation ratio
-	if isAboveLiquidationRatio(collaterals, vaultDebt, state) {
+	if isAboveLiquidationRatio(vaultID, vaultDebt, state) {
 		return nil, fmt.Errorf("2WAY: vault is above liquidation ratio")
 	}
 
@@ -523,17 +524,14 @@ func isAboveMinCRatioWithVault(vaultID []byte, debt *big.Int, additionalDebt *bi
 	return ratio.Cmp(big.NewInt(13000)) >= 0
 }
 
-func isAboveLiquidationRatio(collaterals map[string]*big.Int, debt *big.Int, state *StateDB) bool {
-	totalCollateral := big.NewInt(0)
-	for _, v := range collaterals {
-		totalCollateral = totalCollateral.Add(totalCollateral, v)
-	}
+func isAboveLiquidationRatio(vaultID []byte, debt *big.Int, state *StateDB) bool {
+	totalCollateralUSD := getVaultCollateralValueUSD(vaultID, state)
 
 	if debt.Sign() == 0 {
 		return true
 	}
 
-	ratio := new(big.Int).Mul(totalCollateral, big.NewInt(10000))
+	ratio := new(big.Int).Mul(totalCollateralUSD, big.NewInt(10000))
 	ratio = ratio.Div(ratio, debt)
 
 	return ratio.Cmp(big.NewInt(14000)) > 0
