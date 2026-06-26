@@ -1,0 +1,40 @@
+{
+  "chain_id": "waychain-1",
+  "genesis_time": "2026-06-22T00:00:00Z",
+  "initial_height": 1,
+  "supply_way": 100000000,
+  "validators": [
+    {
+      "id": "genesis-val-1",
+      "stake": 10000
+    },
+    {
+      "id": "genesis-val-2",
+      "stake": 10000
+    },
+    {
+      "id": "genesis-val-3",
+      "stake": 10000
+    },
+    {
+      "id": "genesis-val-4",
+      "stake": 10000
+    },
+    {
+      "id": "genesis-val-5",
+      "stake": 10000
+    }
+  ],
+  "accounts": [
+    {
+      "address": "treasury",
+      "balance": 10000000,
+      "dox_level": 3
+    },
+    {
+      "address": "ecosystem",
+      "balance": 13500000,
+      "dox_level": 3
+    }
+  ]
+}
