@@ -198,16 +198,23 @@ func oracleAggregator(input []byte, caller string, state *StateDB, blockNum uint
 }
 
 // ── 0x0D: OracleScheduler ──
-// Input: [interval(8)] [startBlock(8)] [feedId(32)]
-// Output: [scheduledBlock(8)]
+// Input: [interval(8)] [startBlock(8)] [feedId(32)] [maxExecutions(8)] [reward(8)]
+// Output: [taskId(32)] [nextBlock(8)]
 // Schedules a recurring oracle attestation.
 func oracleScheduler(input []byte, caller string, state *StateDB, blockNum uint64) ([]byte, error) {
-	if len(input) < 48 {
-		return nil, fmt.Errorf("OracleScheduler: input too short (need 48 bytes)")
+	if len(input) < 56 {
+		return nil, fmt.Errorf("OracleScheduler: input too short (need 56 bytes)")
 	}
 
 	interval := new(big.Int).SetBytes(input[0:8]).Uint64()
 	startBlock := new(big.Int).SetBytes(input[8:16]).Uint64()
+	var feedID [32]byte
+	copy(feedID[:], input[16:48])
+	maxExecutions := new(big.Int).SetBytes(input[48:56]).Uint64()
+	var reward uint64
+	if len(input) >= 64 {
+		reward = new(big.Int).SetBytes(input[56:64]).Uint64()
+	}
 
 	if interval < 100 {
 		return nil, fmt.Errorf("OracleScheduler: interval too short (min 100 blocks)")
@@ -216,10 +223,15 @@ func oracleScheduler(input []byte, caller string, state *StateDB, blockNum uint6
 		startBlock = blockNum
 	}
 
-	nextBlock := startBlock + interval
+	te := NewTimeExecution(state)
+	taskID, nextBlock, err := te.ScheduleTask(caller, feedID, interval, startBlock, maxExecutions, reward)
+	if err != nil {
+		return nil, err
+	}
 
-	output := make([]byte, 8)
-	new(big.Int).SetUint64(nextBlock).FillBytes(output)
+	output := make([]byte, 40)
+	copy(output[0:32], taskID[:])
+	new(big.Int).SetUint64(nextBlock).FillBytes(output[32:40])
 	return output, nil
 }
 

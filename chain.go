@@ -453,6 +453,23 @@ func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 	block.Hash = block.ComputeHash()
 	c.Blocks = append(c.Blocks, block)
 
+	// Execute due time-scheduled tasks
+	te := evm.NewTimeExecution(c.State)
+	dueTasks, _ := te.ExecuteDueTasks(c.Height)
+	if len(dueTasks) > 0 {
+		for _, taskID := range dueTasks {
+			// Emit execution event
+			task, _ := te.GetTask(taskID)
+			if task != nil {
+				addr := evm.PrecompileAddrHex(0x0D)
+				c.State.AddLog(addr, [][32]byte{
+					task.FeedID,
+					taskID,
+				}, []byte{byte(task.ExecutionCount)}, c.Height)
+			}
+		}
+	}
+
 	// Distribute staking rewards for this block
 	if c.Staking != nil && c.Staking.BlockRewardLimit > 0 {
 		rewards := c.Staking.DistributeBlockReward(c.Height)
