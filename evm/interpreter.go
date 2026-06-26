@@ -448,7 +448,7 @@ func (evm *EVM) Execute(ctx *CallContext) *ExecutionResult {
 			retOff := stack.Pop().Uint64()
 			_ = stack.Pop().Uint64() // retSize (unused in simplified CALL)
 
-			// Check if target is a precompile (0x0C-0x17)
+			// Check if target is a precompile (0x0C-0x1F)
 			addrBytes := addrVal.Bytes()
 			if len(addrBytes) <= 1 && len(addrBytes) > 0 {
 				addr := addrBytes[0]
@@ -488,7 +488,7 @@ func (evm *EVM) Execute(ctx *CallContext) *ExecutionResult {
 			retOff := stack.Pop().Uint64()
 			_ = stack.Pop().Uint64() // retSize (unused)
 
-			// Check if target is a precompile (0x0C-0x17)
+			// Check if target is a precompile (0x0C-0x1F)
 			addrBytes := addrVal.Bytes()
 			if len(addrBytes) <= 1 && len(addrBytes) > 0 {
 				addr := addrBytes[0]
