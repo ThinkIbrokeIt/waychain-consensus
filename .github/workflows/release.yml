@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,21 +18,32 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26.4'
           cache: true
 
-      - name: Build binary
+      - name: Set up Rust (for revm-ffi)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build revm FFI
+        run: |
+          cd revm-ffi
+          cargo build --release
+          cd ..
+
+      - name: Build binary (CGO_ENABLED=1 — required for EVM execution)
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/revm-ffi/target/release:${LD_LIBRARY_PATH:-}
         run: |
           mkdir -p release
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o release/waychain .
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o release/waychain .
           sha256sum release/waychain > release/checksums.txt
           echo "Built binary:"
           ls -la release/
 
       - name: Test
-        run: go test -count=1 ./...
+        run: CGO_ENABLED=1 go test -count=1 ./...
 
-      - name: Upload artifact (for now)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: waychain-binary-${{ github.ref_name }}
@@ -44,4 +54,3 @@ jobs:
         run: |
           echo "✅ Build complete for ${{ github.ref_name }}"
           echo "Binary available as artifact (download from this run's Artifacts section)"
-          echo "Note: GitHub Release creation requires admin token — download artifact and create release manually"

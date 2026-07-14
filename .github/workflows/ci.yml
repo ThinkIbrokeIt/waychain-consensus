@@ -1,17 +1,48 @@
 name: CI
 
+# Runs on every PR (mandatory under branch protection) and on master.
+# Builds the REAL daemon: Go 1.26.4 + CGO + the Rust revm-ffi library.
+# The old ci.yml used go 1.23 and `go build ./...` with CGO off, which
+# never compiled the EVM/cgo path — a false green. This one does.
+
 on:
+  pull_request:
+    branches: [master]
   push:
     branches: [master]
 
 jobs:
-  test:
+  build-and-test:
+    name: build-and-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
-      - run: go build ./...
-      - run: go test -count=1 ./...
-# Trigger CI
+          go-version: '1.26.4'
+          cache: true
+
+      - name: Set up Rust (for revm-ffi)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build revm FFI (Rust -> librevm_ffi.so)
+        run: |
+          cd revm-ffi
+          cargo build --release
+          cd ..
+          ls -la revm-ffi/target/release/librevm_ffi.so
+
+      - name: Build WayChain daemon (Go + CGo)
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/revm-ffi/target/release:${LD_LIBRARY_PATH:-}
+        run: CGO_ENABLED=1 go build -o waychain .
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/revm-ffi/target/release:${LD_LIBRARY_PATH:-}
+        run: CGO_ENABLED=1 go test -count=1 ./...
