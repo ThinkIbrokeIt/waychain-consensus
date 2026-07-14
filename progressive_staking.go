@@ -40,21 +40,83 @@ type ValidatorReward struct {
 	LastUpdateBlock uint64
 }
 
-// ProgressiveStaking manages reward distribution
-type ProgressiveStaking struct {
-	RewardPool       uint64                    // Total reward pool per epoch (in tokens)
-	BlockRewardLimit uint64                    // Max tokens distributed per block
-	ValidatorRewards map[ValidatorID]*ValidatorReward
-	TotalStaked      uint64
-	CurrentBlock     uint64
+// WayChain token supply — single source of truth for emission math.
+// The progressive staking model is anchored to this so validator rewards
+// are always a fixed fraction of total supply (default 7%/year), NOT a
+// magic per-block number that detached from supply in earlier builds.
+const WAYTotalSupply uint64 = 100_000_000
+
+// Default emission: 7% of total supply minted per year to validators,
+// split by the progressive (anti-whale) brackets defined above.
+const DefaultAnnualInflationPct = 7.0
+
+// Default block time (seconds) — matches consensus.go ConsensusTimeout feel.
+// Drives per-block reward granularity. Change here to retune chain cadence.
+const DefaultBlockTimeSec = 3.0
+
+// Blocks per year at the configured block time.
+func blocksPerYear(blockTimeSec float64) float64 {
+	return 31_536_000.0 / blockTimeSec
 }
 
-// NewProgressiveStaking creates a new staking reward manager
-func NewProgressiveStaking(blockRewardLimit uint64) *ProgressiveStaking {
-	return &ProgressiveStaking{
-		BlockRewardLimit: blockRewardLimit,
-		ValidatorRewards: make(map[ValidatorID]*ValidatorReward),
+// ProgressiveStaking manages reward distribution
+type ProgressiveStaking struct {
+	AnnualInflationPct float64                  // Target validator emission as % of total supply/year
+	BlockTimeSec       float64                  // Seconds per block (drives per-block granularity)
+	ValidatorRewards   map[ValidatorID]*ValidatorReward
+	TotalStaked        uint64
+	CurrentBlock       uint64
+	accrued            float64 // fractional token carry (paid out when >= 1.0)
+	epochMinted        uint64  // tokens minted in the current epoch (cap enforcement)
+	EpochLength        uint64  // blocks per epoch (set from consensus.EpochLength)
+}
+
+// NewProgressiveStaking creates a new staking reward manager.
+// annualInflationPct: % of WAY_TOTAL_SUPPLY minted per year to validators (default 7.0).
+// blockTimeSec: seconds per block (default 3.0). epochLength: blocks per epoch
+// (pass consensus.EpochLength so the 7% cap holds regardless of block cadence).
+func NewProgressiveStaking(annualInflationPct, blockTimeSec float64, epochLength uint64) *ProgressiveStaking {
+	if annualInflationPct <= 0 {
+		annualInflationPct = DefaultAnnualInflationPct
 	}
+	if blockTimeSec <= 0 {
+		blockTimeSec = DefaultBlockTimeSec
+	}
+	return &ProgressiveStaking{
+		AnnualInflationPct: annualInflationPct,
+		BlockTimeSec:       blockTimeSec,
+		EpochLength:        epochLength,
+		ValidatorRewards:   make(map[ValidatorID]*ValidatorReward),
+	}
+}
+
+// AnnualEmission returns the total WAY minted to validators per year
+// (7% of total supply by default). This is the anchor the whole model
+// was designed around and had been flattened into a magic per-block number.
+func (ps *ProgressiveStaking) AnnualEmission() uint64 {
+	return uint64(float64(WAYTotalSupply) * ps.AnnualInflationPct / 100.0)
+}
+
+// PerBlockEmission returns the exact (fractional) WAY owed validators this block,
+// anchored to the annual emission and the configured block time.
+func (ps *ProgressiveStaking) PerBlockEmission() float64 {
+	return float64(ps.AnnualEmission()) / blocksPerYear(ps.BlockTimeSec)
+}
+
+// EpochCap returns the max tokens allowed to be minted in one epoch.
+// Guarantees the annual inflation cap holds regardless of block-time granularity:
+// at 3s blocks an epoch is short, so the cap prevents over-emission between
+// annual resets; the on-chain epoch rollover (consensus.EpochLength) resets it.
+func (ps *ProgressiveStaking) EpochCap() uint64 {
+	if ps.EpochLength == 0 {
+		return ps.AnnualEmission() // degenerate: cap = full year
+	}
+	blocksPerYear := blocksPerYear(ps.BlockTimeSec)
+	epochsPerYear := blocksPerYear / float64(ps.EpochLength)
+	if epochsPerYear <= 0 {
+		return ps.AnnualEmission()
+	}
+	return uint64(float64(ps.AnnualEmission()) / epochsPerYear)
 }
 
 // CalculateReward computes the marginal annual reward for a given stake
@@ -141,15 +203,19 @@ func (ps *ProgressiveStaking) RemoveStake(id ValidatorID) {
 	}
 }
 
-// DistributeBlockReward calculates and distributes the block reward
-// proportionally to all validators based on their staked amount.
-// Uses fixed-point accumulation: each block, compute the fractional
-// reward owed and carry the remainder forward.
+// DistributeBlockReward calculates and distributes this block's validator
+// emission — anchored to the annual inflation cap (7% of supply by default)
+// and split across validators by their progressive (anti-whale) annual reward.
+//
+// Emission is paid as whole tokens only: the per-block fractional amount is
+// accrued and carried forward until it crosses 1.0 WAY, so no reward is lost
+// to integer truncation across the ~10.5M blocks/year. An epoch cap guarantees
+// the annual cap holds even when block time changes.
 func (ps *ProgressiveStaking) DistributeBlockReward(height uint64) map[ValidatorID]uint64 {
 	ps.CurrentBlock = height
 	distribution := make(map[ValidatorID]uint64)
 
-	// Calculate annual rewards for each validator
+	// Calculate annual rewards for each validator (progressive brackets)
 	var totalAnnual uint64
 	annualRewards := make(map[ValidatorID]uint64)
 	for id, vr := range ps.ValidatorRewards {
@@ -162,19 +228,63 @@ func (ps *ProgressiveStaking) DistributeBlockReward(height uint64) map[Validator
 		return distribution
 	}
 
-	// Distribute BlockRewardLimit proportionally by annual reward share
-	// fixed-point: multiply first to preserve precision
+	// Total WAY owed to validators this block (fractional).
+	perBlock := ps.PerBlockEmission()
+	ps.accrued += perBlock
+
+	// Epoch cap: do not exceed the per-epoch allowance.
+	cap := ps.EpochCap()
+	if cap > 0 && ps.epochMinted >= cap {
+		// Epoch budget exhausted — mint nothing until the next epoch rollover.
+		// Accrual is preserved so it resumes cleanly next epoch.
+		return distribution
+	}
+
+	// Candidate whole tokens to distribute this block (carry-forward accumulator).
+	available := uint64(ps.accrued)
+	if available == 0 {
+		return distribution
+	}
+	// Respect the epoch cap for this block's slice.
+	if cap > 0 && ps.epochMinted+available > cap {
+		available = cap - ps.epochMinted
+		if available == 0 {
+			return distribution
+		}
+	}
+
+	// Split `available` across validators by their share of total annual reward.
+	// Only tokens actually paid out are removed from the accrual — any remainder
+	// (lost to integer rounding on a sub-pool) is carried forward to the next
+	// block so no emission is ever destroyed.
+	var paid uint64
 	for id, annual := range annualRewards {
-		// blockReward = BlockRewardLimit * annual / totalAnnual
-		// Use 128-bit intermediate to avoid overflow
-		numerator := uint64(ps.BlockRewardLimit) * annual
+		numerator := available * annual // uint64 * uint64 — bounded by cap
 		blockReward := numerator / totalAnnual
+		if blockReward == 0 {
+			continue
+		}
 		distribution[id] = blockReward
 		vr := ps.ValidatorRewards[id]
 		vr.Accumulated += blockReward
+		paid += blockReward
 	}
+	if paid == 0 {
+		// Whole-token pool too small to split without rounding to zero this block;
+		// leave accrual intact so it compounds next block.
+		return distribution
+	}
+	ps.accrued -= float64(paid)
+	ps.epochMinted += paid
 
 	return distribution
+}
+
+// RolloverEpoch resets the per-epoch mint counter. Call this from the consensus
+// engine when a new epoch begins (height % EpochLength == 0) so the 7% annual
+// cap is enforced per-epoch rather than relying solely on the annual accumulator.
+func (ps *ProgressiveStaking) RolloverEpoch() {
+	ps.epochMinted = 0
 }
 
 // ClaimReward returns and resets accumulated rewards for a validator

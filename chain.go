@@ -170,7 +170,7 @@ func NewChain() *Chain {
 		EVM:     evmEngine,
 		Blocks:  make([]*BlockWithTx, 0),
 		Height:  0,
-		Staking: NewProgressiveStaking(100000), // 100K tokens/epoch reward pool
+		Staking: NewProgressiveStaking(DefaultAnnualInflationPct, DefaultBlockTimeSec, EpochLength), // 7% of supply/year, 3s blocks, 10000-block epochs
 	}
 
 	// Initialize precompile state at genesis
@@ -533,8 +533,13 @@ func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 		}
 	}
 
-	// Distribute staking rewards for this block
-	if c.Staking != nil && c.Staking.BlockRewardLimit > 0 {
+	// Rollover the per-epoch emission cap when a new epoch begins.
+	if c.Staking != nil && c.Staking.EpochLength > 0 && c.Height%c.Staking.EpochLength == 0 {
+		c.Staking.RolloverEpoch()
+	}
+
+	// Distribute staking rewards for this block (anchored to the 7% annual cap).
+	if c.Staking != nil {
 		rewards := c.Staking.DistributeBlockReward(c.Height)
 		for id, amount := range rewards {
 			if amount > 0 {

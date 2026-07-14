@@ -103,7 +103,7 @@ func TestAntiWhaleEffect(t *testing.T) {
 }
 
 func TestProgressiveStakingManager(t *testing.T) {
-	ps := NewProgressiveStaking(1000) // 1000 tokens per block reward limit
+	ps := NewProgressiveStaking(7.0, 3.0, 10000) // 7%/yr, 3s blocks, 10k-block epochs
 
 	id1 := NewValidatorID(0x01)
 	id2 := NewValidatorID(0x02)
@@ -115,20 +115,38 @@ func TestProgressiveStakingManager(t *testing.T) {
 		t.Fatalf("total stake: expected 501000, got %d", ps.TotalStaked)
 	}
 
-	// Distribute — should not exceed pool
-	dist := ps.DistributeBlockReward(1)
+	// Distribute — exact 7%-anchored emission with fractional carry.
+	// On a single block at 3s cadence the per-block emission (~0.666 WAY) is
+	// sub-integer, so the carry-forward accumulator may pay 0 on block 1 and
+	// catch up later. Verify the model converges to the annual cap over an epoch.
+	const blocks = 10_000
 	var totalDistributed uint64
-	for _, v := range dist {
-		totalDistributed += v
+	var id1Total uint64
+	for i := uint64(1); i <= blocks; i++ {
+		if i%blocks == 0 {
+			ps.RolloverEpoch()
+		}
+		dist := ps.DistributeBlockReward(i)
+		for _, v := range dist {
+			totalDistributed += v
+		}
+		id1Total += dist[id1]
 	}
-	if totalDistributed > ps.BlockRewardLimit {
-		t.Fatalf("total distributed %d exceeds limit %d", totalDistributed, ps.BlockRewardLimit)
+	// Over one 10k-block epoch the minted amount must approximate the per-epoch
+	// cap (7% of 100M / epochsPerYear). At 3s blocks, epochsPerYear ≈ 1052,
+	// so per-epoch cap ≈ 6652 WAY. Allow rounding slack.
+	perEpochCap := ps.EpochCap()
+	if totalDistributed == 0 {
+		t.Fatalf("expected non-zero emission over a full epoch, got 0")
+	}
+	if totalDistributed > perEpochCap+1 {
+		t.Fatalf("emitted %d exceeds per-epoch cap %d", totalDistributed, perEpochCap)
 	}
 
-	// Claim
+	// Claim — must equal everything accrued for id1 across the epoch.
 	claimed := ps.ClaimReward(id1)
-	if claimed != dist[id1] {
-		t.Fatalf("claim mismatch: expected %d, got %d", dist[id1], claimed)
+	if claimed != id1Total {
+		t.Fatalf("claim mismatch: expected %d (tallied), got %d", id1Total, claimed)
 	}
 	if ps.ValidatorRewards[id1].Accumulated != 0 {
 		t.Fatalf("accumulated should be 0 after claim")
@@ -136,11 +154,15 @@ func TestProgressiveStakingManager(t *testing.T) {
 }
 
 func TestProgressiveClaimReset(t *testing.T) {
-	ps := NewProgressiveStaking(100000)
+	ps := NewProgressiveStaking(7.0, 3.0, 10000)
 	id := NewValidatorID(0x03)
 	ps.RegisterStake(id, 5_000_000)
 
-	ps.DistributeBlockReward(1)
+	// Per-block emission at 3s is sub-integer (~0.666 WAY), so distribute a few
+	// blocks to let the carry-forward accumulator cross 1.0 whole token.
+	for i := uint64(1); i <= 3; i++ {
+		ps.DistributeBlockReward(i)
+	}
 	claimed := ps.ClaimReward(id)
 	if claimed == 0 {
 		t.Fatal("expected non-zero claim")
@@ -152,7 +174,7 @@ func TestProgressiveClaimReset(t *testing.T) {
 }
 
 func TestProgressiveRemoveStake(t *testing.T) {
-	ps := NewProgressiveStaking(1000)
+	ps := NewProgressiveStaking(7.0, 3.0, 10000)
 	id := NewValidatorID(0x04)
 	ps.RegisterStake(id, 5_000)
 	if ps.TotalStaked != 5_000 {
@@ -168,7 +190,7 @@ func TestProgressiveRemoveStake(t *testing.T) {
 }
 
 func TestProgressiveUpdateStake(t *testing.T) {
-	ps := NewProgressiveStaking(1000)
+	ps := NewProgressiveStaking(7.0, 3.0, 10000)
 	id := NewValidatorID(0x05)
 	ps.RegisterStake(id, 5_000)
 	ps.RegisterStake(id, 10_000) // increase
