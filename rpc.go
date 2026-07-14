@@ -157,6 +157,10 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 		}
 		blockNumStr := fmt.Sprintf("%v", p[0])
 		var blockNum int
+		fullTx := false
+		if len(p) > 1 {
+			if b, ok := p[1].(bool); ok { fullTx = b }
+		}
 		if strings.HasPrefix(blockNumStr, "0x") {
 			fmt.Sscanf(blockNumStr, "0x%x", &blockNum)
 		} else if blockNumStr == "latest" || blockNumStr == "pending" {
@@ -168,35 +172,64 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 			return nil, nil
 		}
 		block := rpc.chain.Blocks[blockNum]
+
+		// Build transactions array
+		var txResult interface{}
+		if fullTx {
+			txList := make([]map[string]interface{}, len(block.Transactions))
+			for i, tx := range block.Transactions {
+				j, _ := json.Marshal(tx.ToJSON())
+				var m map[string]interface{}
+				json.Unmarshal(j, &m)
+				txList[i] = m
+			}
+			txResult = txList
+		} else {
+			txList := make([]string, len(block.Transactions))
+			for i, tx := range block.Transactions {
+				txList[i] = "0x" + hex.EncodeToString(tx.Hash[:])
+			}
+			txResult = txList
+		}
+
 		return map[string]interface{}{
 			"number":       fmt.Sprintf("0x%x", block.Height),
 			"hash":         fmt.Sprintf("0x%x", block.Hash),
 			"parentHash":   fmt.Sprintf("0x%x", block.PrevHash),
 			"timestamp":    fmt.Sprintf("0x%x", block.Timestamp),
-			"transactions": len(block.Transactions),
+			"transactions": txResult,
 			"proposer":     block.Proposer.String(),
 		}, nil
 
 	case "eth_getBlockByHash":
-		var p []interface{}
-		if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
-			return nil, fmt.Errorf("invalid params")
-		}
-		hashStr := strings.TrimPrefix(fmt.Sprintf("%v", p[0]), "0x")
-		for _, block := range rpc.chain.Blocks {
-			blockHash := fmt.Sprintf("%x", block.Hash)
-			if strings.EqualFold(blockHash, hashStr[:min(len(hashStr), len(blockHash))]) {
-				return map[string]interface{}{
-					"number":       fmt.Sprintf("0x%x", block.Height),
-					"hash":         fmt.Sprintf("0x%x", block.Hash),
-					"parentHash":   fmt.Sprintf("0x%x", block.PrevHash),
-					"timestamp":    fmt.Sprintf("0x%x", block.Timestamp),
-					"transactions": len(block.Transactions),
-					"proposer":     block.Proposer.String(),
-				}, nil
+			var p []interface{}
+			if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
+				return nil, fmt.Errorf("invalid params")
 			}
-		}
-		return nil, nil
+			hashStr := strings.TrimPrefix(fmt.Sprintf("%v", p[0]), "0x")
+
+			for _, blk := range rpc.chain.Blocks {
+				blockHash := fmt.Sprintf("%x", blk.Hash)
+				if strings.EqualFold(blockHash, hashStr[:min(len(hashStr), len(blockHash))]) {
+					// Build transactions array (same as eth_getBlockByNumber)
+					txList := make([]map[string]interface{}, len(blk.Transactions))
+					for i, tx := range blk.Transactions {
+						j, _ := json.Marshal(tx.ToJSON())
+						var m map[string]interface{}
+						json.Unmarshal(j, &m)
+						txList[i] = m
+					}
+					return map[string]interface{}{
+						"number":       fmt.Sprintf("0x%x", blk.Height),
+						"hash":         fmt.Sprintf("0x%x", blk.Hash),
+						"parentHash":   fmt.Sprintf("0x%x", blk.PrevHash),
+						"timestamp":    fmt.Sprintf("0x%x", blk.Timestamp),
+						"transactions": txList,
+						"proposer":     blk.Proposer.String(),
+					}, nil
+				}
+			}
+			return nil, nil
 
 	// ── Account methods ──
 	case "eth_getBalance":
@@ -225,7 +258,40 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 
 	// ── Call / Estimate ──
 	case "eth_call":
-		return "0x", nil
+		var p []map[string]interface{}
+		if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
+			return nil, fmt.Errorf("invalid params")
+		}
+		call := p[0]
+
+		to, _ := call["to"].(string)
+		dataStr, _ := call["data"].(string)
+		from, _ := call["from"].(string)
+
+		data, err := hex.DecodeString(strings.TrimPrefix(dataStr, "0x"))
+		if err != nil {
+			return "0x", nil
+		}
+		from = strings.ToLower(strings.TrimPrefix(from, "0x"))
+		to = strings.ToLower(strings.TrimPrefix(to, "0x"))
+
+		// Route through EVM (precompile or revm contract execution)
+		snapshot := rpc.chain.State.Clone()
+		callEVM := evm.NewEVM(snapshot, evm.ConsensusLane, rpc.chain.Height,
+			uint64(time.Now().Unix()), 10008, 30_000_000, "")
+		ctx := &evm.CallContext{
+			Caller:   from,
+			Address:  to,
+			Value:    big.NewInt(0),
+			GasLimit: 30_000_000,
+			Calldata: data,
+			ReadOnly: true,
+		}
+		result := callEVM.Execute(ctx)
+		if result.Error != nil {
+			return "0x", nil
+		}
+		return "0x" + hex.EncodeToString(result.ReturnData), nil
 	case "eth_estimateGas":
 		return "0x5208", nil // 21000 gas
 
@@ -258,11 +324,76 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 		}
 		return fmt.Sprintf("0x%s", acc.Balance.Text(16)), nil
 
+	case "way_fundGenesis":
+		var p []string
+		if err := json.Unmarshal(params, &p); err != nil || len(p) < 2 {
+			return nil, fmt.Errorf("invalid params: expected [\"addr\", \"amount\"]")
+		}
+		addr := strings.ToLower(strings.TrimPrefix(p[0], "0x"))
+		amtStr := strings.TrimPrefix(p[1], "0x")
+		amt, ok := new(big.Int).SetString(amtStr, 16)
+		if !ok {
+			return nil, fmt.Errorf("invalid amount: %s", p[1])
+		}
+		rpc.mu.Lock()
+		acc := rpc.chain.State.GetOrCreateAccount(addr)
+		if acc.Balance == nil {
+			acc.Balance = new(big.Int)
+		}
+		acc.Balance.Add(acc.Balance, amt)
+		if acc.DoxDevLevel < 3 {
+			acc.DoxDevLevel = 3
+		}
+		// Persist to disk if store is configured
+		if rpc.chain.Store != nil {
+			_ = rpc.chain.Store.SaveAllAccounts(rpc.chain.State)
+		}
+		rpc.mu.Unlock()
+		return fmt.Sprintf("0x%s", acc.Balance.Text(16)), nil
+
 	case "way_getBlockCount":
 		rpc.mu.RLock()
 		count := len(rpc.chain.Blocks)
 		rpc.mu.RUnlock()
 		return strconv.Itoa(count), nil
+
+	// ── Wallet P3 panel read surfaces ──
+	// These expose existing precompile READ functions without going through
+	// eth_call (which the public RPC blocks for precompiles). Read-only.
+	case "way_govProposals":
+		return evm.GovernanceListProposals(rpc.chain.State), nil
+
+	case "way_twoWayStats":
+		vaults, debt := evm.GetTwoWayStats(rpc.chain.State)
+		return map[string]interface{}{
+			"vaults":   fmt.Sprintf("0x%x", vaults),
+			"totalDebt": fmt.Sprintf("0x%x", debt),
+		}, nil
+
+	case "way_bridgeStats":
+		committed, withdrawn := evm.GetBridgeStats(rpc.chain.State)
+		return map[string]interface{}{
+			"committed": fmt.Sprintf("0x%x", committed),
+			"withdrawn": fmt.Sprintf("0x%x", withdrawn),
+		}, nil
+
+	// ── Contract Deployment ──
+	case "way_deployCode":
+		var p []string
+		if err := json.Unmarshal(params, &p); err != nil || len(p) < 2 {
+			return nil, fmt.Errorf("invalid params: expected [\"deployer_hex\", \"bytecode_hex\"]")
+		}
+		deployer := strings.ToLower(strings.TrimPrefix(p[0], "0x"))
+		bytecodeHex := strings.TrimPrefix(p[1], "0x")
+		bytecode, err := hex.DecodeString(bytecodeHex)
+		if err != nil {
+			return nil, fmt.Errorf("invalid bytecode: %v", err)
+		}
+		addr, err := rpc.chain.EVM.DeployContractFromCode(deployer, bytecode, evm.ClassA)
+		if err != nil {
+			return nil, fmt.Errorf("deploy failed: %v", err)
+		}
+		return "0x" + addr, nil
 
 	// ── Transaction methods ──
 

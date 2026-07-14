@@ -85,14 +85,72 @@ const (
 
 	// Push Operations (0x60-0x7F)
 	PUSH1  Opcode = 0x60
+	PUSH2  Opcode = 0x61
+	PUSH3  Opcode = 0x62
+	PUSH4  Opcode = 0x63
+	PUSH5  Opcode = 0x64
+	PUSH6  Opcode = 0x65
+	PUSH7  Opcode = 0x66
+	PUSH8  Opcode = 0x67
+	PUSH9  Opcode = 0x68
+	PUSH10 Opcode = 0x69
+	PUSH11 Opcode = 0x6A
+	PUSH12 Opcode = 0x6B
+	PUSH13 Opcode = 0x6C
+	PUSH14 Opcode = 0x6D
+	PUSH15 Opcode = 0x6E
+	PUSH16 Opcode = 0x6F
+	PUSH17 Opcode = 0x70
+	PUSH18 Opcode = 0x71
+	PUSH19 Opcode = 0x72
+	PUSH20 Opcode = 0x73
+	PUSH21 Opcode = 0x74
+	PUSH22 Opcode = 0x75
+	PUSH23 Opcode = 0x76
+	PUSH24 Opcode = 0x77
+	PUSH25 Opcode = 0x78
+	PUSH26 Opcode = 0x79
+	PUSH27 Opcode = 0x7A
+	PUSH28 Opcode = 0x7B
+	PUSH29 Opcode = 0x7C
+	PUSH30 Opcode = 0x7D
+	PUSH31 Opcode = 0x7E
 	PUSH32 Opcode = 0x7F
 
 	// Duplication Operations (0x80-0x8F)
-	DUP1 Opcode = 0x80
+	DUP1  Opcode = 0x80
+	DUP2  Opcode = 0x81
+	DUP3  Opcode = 0x82
+	DUP4  Opcode = 0x83
+	DUP5  Opcode = 0x84
+	DUP6  Opcode = 0x85
+	DUP7  Opcode = 0x86
+	DUP8  Opcode = 0x87
+	DUP9  Opcode = 0x88
+	DUP10 Opcode = 0x89
+	DUP11 Opcode = 0x8A
+	DUP12 Opcode = 0x8B
+	DUP13 Opcode = 0x8C
+	DUP14 Opcode = 0x8D
+	DUP15 Opcode = 0x8E
 	DUP16 Opcode = 0x8F
 
 	// Exchange Operations (0x90-0x9F)
-	SWAP1 Opcode = 0x90
+	SWAP1  Opcode = 0x90
+	SWAP2  Opcode = 0x91
+	SWAP3  Opcode = 0x92
+	SWAP4  Opcode = 0x93
+	SWAP5  Opcode = 0x94
+	SWAP6  Opcode = 0x95
+	SWAP7  Opcode = 0x96
+	SWAP8  Opcode = 0x97
+	SWAP9  Opcode = 0x98
+	SWAP10 Opcode = 0x99
+	SWAP11 Opcode = 0x9A
+	SWAP12 Opcode = 0x9B
+	SWAP13 Opcode = 0x9C
+	SWAP14 Opcode = 0x9D
+	SWAP15 Opcode = 0x9E
 	SWAP16 Opcode = 0x9F
 
 	// Logging Operations (0xA0-0xA4)
@@ -226,10 +284,55 @@ var OpcodeTable = map[Opcode]OpcodeInfo{
 
 	// Push (PUSH1 shown — others are N+2 gas)
 	PUSH1:  {"PUSH1", 3, 0, 1},
+	PUSH2:  {"PUSH2", 3, 0, 1},
+	PUSH3:  {"PUSH3", 3, 0, 1},
+	PUSH4:  {"PUSH4", 3, 0, 1},
+	PUSH5:  {"PUSH5", 3, 0, 1},
+	PUSH6:  {"PUSH6", 3, 0, 1},
+	PUSH7:  {"PUSH7", 3, 0, 1},
+	PUSH8:  {"PUSH8", 3, 0, 1},
+	PUSH9:  {"PUSH9", 3, 0, 1},
+	PUSH10: {"PUSH10", 3, 0, 1},
+	PUSH11: {"PUSH11", 3, 0, 1},
+	PUSH12: {"PUSH12", 3, 0, 1},
+	PUSH13: {"PUSH13", 3, 0, 1},
+	PUSH14: {"PUSH14", 3, 0, 1},
+	PUSH15: {"PUSH15", 3, 0, 1},
+	PUSH16: {"PUSH16", 3, 0, 1},
+	PUSH17: {"PUSH17", 3, 0, 1},
+	PUSH18: {"PUSH18", 3, 0, 1},
+	PUSH19: {"PUSH19", 3, 0, 1},
+	PUSH20: {"PUSH20", 3, 0, 1},
+	PUSH21: {"PUSH21", 3, 0, 1},
+	PUSH22: {"PUSH22", 3, 0, 1},
+	PUSH23: {"PUSH23", 3, 0, 1},
+	PUSH24: {"PUSH24", 3, 0, 1},
+	PUSH25: {"PUSH25", 3, 0, 1},
+	PUSH26: {"PUSH26", 3, 0, 1},
+	PUSH27: {"PUSH27", 3, 0, 1},
+	PUSH28: {"PUSH28", 3, 0, 1},
+	PUSH29: {"PUSH29", 3, 0, 1},
+	PUSH30: {"PUSH30", 3, 0, 1},
+	PUSH31: {"PUSH31", 3, 0, 1},
 	PUSH32: {"PUSH32", 3, 0, 1},
 
 	// DUP
-	DUP1: {"DUP1", 3, 1, 1},
+	DUP1:  {"DUP1", 3, 1, 1},
+	DUP2:  {"DUP2", 3, 2, 1},
+	DUP3:  {"DUP3", 3, 3, 1},
+	DUP4:  {"DUP4", 3, 4, 1},
+	DUP5:  {"DUP5", 3, 5, 1},
+	DUP6:  {"DUP6", 3, 6, 1},
+	DUP7:  {"DUP7", 3, 7, 1},
+	DUP8:  {"DUP8", 3, 8, 1},
+	DUP9:  {"DUP9", 3, 9, 1},
+	DUP10: {"DUP10", 3, 10, 1},
+	DUP11: {"DUP11", 3, 11, 1},
+	DUP12: {"DUP12", 3, 12, 1},
+	DUP13: {"DUP13", 3, 13, 1},
+	DUP14: {"DUP14", 3, 14, 1},
+	DUP15: {"DUP15", 3, 15, 1},
+	DUP16: {"DUP16", 3, 16, 1},
 
 	// SWAP
 	SWAP1: {"SWAP1", 3, 2, 0},

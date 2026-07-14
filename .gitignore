@@ -4,6 +4,15 @@ waychain-consensus
 waychain-test
 *.test
 
+# Generated artifacts
+waychain.new
+deploy_gauntlet
+revm-ffi/target/
+
+# Tool demo binaries (moved to scripts/)
+cmd/rpc_fund
+cmd/extract_key
+
 # Test output
 evm/circuits/*
 
@@ -14,3 +23,6 @@ evm/circuits/*
 # IDE
 .vscode/
 .idea/
+
+# Agent scratch
+.hermes/

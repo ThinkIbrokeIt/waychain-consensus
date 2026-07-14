@@ -1,69 +1,62 @@
 package evm
 
 import (
-	"fmt"
+	"crypto/ed25519"
+	"crypto/rand"
 	"math/big"
 	"testing"
 )
 
 func TestPrecompileOracleAggregator(t *testing.T) {
+	o1pub, o1priv, _ := ed25519.GenerateKey(rand.Reader)
+	o2pub, o2priv, _ := ed25519.GenerateKey(rand.Reader)
+	o3pub, o3priv, _ := ed25519.GenerateKey(rand.Reader)
 	state := NewStateDB()
-
-	// Create test accounts with hex addresses matching what the precompile produces
-	// fmt.Sprintf("oracle_%x", [20]byte{...}) → "oracle_61616161..."
-	accBytes := func(prefix byte) []byte {
-		b := make([]byte, 20)
-		for i := 0; i < 20; i++ {
-			b[i] = prefix
-		}
-		return b
+	for _, o := range []ed25519.PublicKey{o1pub, o2pub, o3pub} {
+		a := state.GetOrCreateAccount(addrFromPubKey(o))
+		a.DoxDevLevel = 2
 	}
+	dh := make([]byte, 32)
+	copy(dh, []byte("shared-data-hash-1234567890abcdef"))
 
-	acc1 := state.GetOrCreateAccount(fmt.Sprintf("oracle_%x", accBytes(0xaa)))
-	acc1.DoxDevLevel = 2
-	acc2 := state.GetOrCreateAccount(fmt.Sprintf("oracle_%x", accBytes(0xbb)))
-	acc2.DoxDevLevel = 3
-	acc3 := state.GetOrCreateAccount(fmt.Sprintf("oracle_%x", accBytes(0xcc)))
-	acc3.DoxDevLevel = 1 // Level 1 — not eligible
-
-	// Input: 3 oracle IDs (20 bytes each) + data (32 bytes)
-	input := make([]byte, 92)
-	copy(input[0:20], accBytes(0xaa))
-	copy(input[20:40], accBytes(0xbb))
-	copy(input[40:60], accBytes(0xcc))
-	// data at position 60
-	copy(input[60:92], []byte("test_data_32_bytes_1234567890123456"))
+	vals := []*big.Int{big.NewInt(100), big.NewInt(200), big.NewInt(300)}
+	input := []byte{3}
+	for i, o := range []ed25519.PublicKey{o1pub, o2pub, o3pub} {
+		vb := make([]byte, 32)
+		vals[i].FillBytes(vb)
+		sig := ed25519.Sign([]ed25519.PrivateKey{o1priv, o2priv, o3priv}[i], dh)
+		input = append(input, o...)
+		input = append(input, vb...)
+		input = append(input, dh...)
+		input = append(input, sig...)
+	}
 
 	result, err := oracleAggregator(input, "", state, 100)
 	if err != nil {
 		t.Fatalf("oracleAggregator failed: %v", err)
 	}
-	if len(result) < 33 {
-		t.Fatalf("output too short: %d", len(result))
+	if result[0] != 100 {
+		t.Fatalf("expected 100%% confidence, got %d%%", result[0])
 	}
-	// 2 of 3 oracles verified = 66% confidence
-	if result[0] != 66 {
-		t.Fatalf("expected 66%% confidence, got %d%%", result[0])
+	med := new(big.Int).SetBytes(result[1:33])
+	if med.Cmp(big.NewInt(200)) != 0 {
+		t.Fatalf("expected median 200, got %s", med)
 	}
-	t.Logf("✅ OracleAggregator: %d%% confidence (2/3 verified)", result[0])
+	t.Logf("✅ OracleAggregator: 3/3 verified, 100%% confidence, median 200")
 }
 
 func TestPrecompileOracleVerifier(t *testing.T) {
-	accBytes := func(prefix byte) []byte {
-		b := make([]byte, 20)
-		for i := 0; i < 20; i++ {
-			b[i] = prefix
-		}
-		return b
-	}
-
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	state := NewStateDB()
-	acc := state.GetOrCreateAccount(fmt.Sprintf("%x", accBytes(0xaa)))
+	acc := state.GetOrCreateAccount(addrFromPubKey(pub))
 	acc.DoxDevLevel = 2
 
-	// Input: oracle_id(20) + hash(32) + sig(32)
-	input := make([]byte, 84)
-	copy(input[0:20], accBytes(0xaa))
+	dh := make([]byte, 32)
+	copy(dh, []byte("attestation-hash-1234567890abcdef"))
+	sig := ed25519.Sign(priv, dh)
+
+	input := append(append(make([]byte, 0, 128), pub...), dh...)
+	input = append(input, sig...)
 
 	result, err := oracleVerifier(input, "", state, 100)
 	if err != nil {
@@ -72,7 +65,61 @@ func TestPrecompileOracleVerifier(t *testing.T) {
 	if result[0] != 1 {
 		t.Fatalf("expected valid (1), got %d", result[0])
 	}
-	t.Logf("✅ OracleVerifier: oracle verified (Dox_Dev Level 2)")
+	t.Logf("✅ OracleVerifier: oracle signature verified (Dox_Dev Level 2)")
+}
+
+func TestPrecompileAccountRecovery(t *testing.T) {
+	g1pub, g1priv, _ := ed25519.GenerateKey(rand.Reader)
+	g2pub, g2priv, _ := ed25519.GenerateKey(rand.Reader)
+	g3pub, g3priv, _ := ed25519.GenerateKey(rand.Reader)
+	targetPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	newOwnerPub, _, _ := ed25519.GenerateKey(rand.Reader)
+
+	state := NewStateDB()
+	for _, g := range []ed25519.PublicKey{g1pub, g2pub, g3pub} {
+		a := state.GetOrCreateAccount(addrFromPubKey(g))
+		a.DoxDevLevel = 3
+	}
+
+	msg := append(append(make([]byte, 0, 64), targetPub...), newOwnerPub...)
+	input := append(make([]byte, 0, 32+32+3*(32+64)), targetPub...)
+	input = append(input, newOwnerPub...)
+	for _, g := range []struct {
+		pub ed25519.PublicKey
+		priv ed25519.PrivateKey
+	}{{g1pub, g1priv}, {g2pub, g2priv}, {g3pub, g3priv}} {
+		sig := ed25519.Sign(g.priv, msg)
+		input = append(input, g.pub...)
+		input = append(input, sig...)
+	}
+
+	result, err := accountRecovery(input, "", state, 100)
+	if err != nil {
+		t.Fatalf("accountRecovery failed: %v", err)
+	}
+	if result[20] != 1 {
+		t.Fatalf("expected recovery success (1), got %d", result[20])
+	}
+	t.Logf("✅ AccountRecovery: 3/3 guardian signatures verified, account re-keyed")
+}
+
+func TestPrecompileBLS(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	msg := make([]byte, 32)
+	copy(msg, []byte("message-to-sign-1234567890abcdef"))
+	sig := ed25519.Sign(priv, msg)
+
+	input := append(append(make([]byte, 0, 128), pub...), msg...)
+	input = append(input, sig...)
+
+	result, err := blsVerify(input, "", nil, 100)
+	if err != nil {
+		t.Fatalf("blsVerify failed: %v", err)
+	}
+	if result[0] != 1 {
+		t.Fatalf("expected valid (1), got %d", result[0])
+	}
+	t.Logf("✅ AggregateSignatureVerify: ed25519 signature verified")
 }
 
 func TestPrecompileStateRent(t *testing.T) {
@@ -96,59 +143,6 @@ func TestPrecompileStateRent(t *testing.T) {
 		t.Fatalf("rent should be > 0")
 	}
 	t.Logf("✅ StateRent: %d WAY due for 10KB contract", rent.Uint64())
-}
-
-func TestPrecompileAccountRecovery(t *testing.T) {
-	accBytes := func(prefix byte) []byte {
-		b := make([]byte, 20)
-		for i := 0; i < 20; i++ {
-			b[i] = prefix
-		}
-		return b
-	}
-
-	state := NewStateDB()
-
-	// Set up guardians with Dox_Dev badges
-	for i, prefix := range []byte{0xaa, 0xbb, 0xcc} {
-		acc := state.GetOrCreateAccount(fmt.Sprintf("%x", accBytes(prefix)))
-		acc.DoxDevLevel = uint8(i + 2)
-	}
-
-	// Input: target(20) + 3 guardian IDs (20 each) + 3 sigs (32 each)
-	input := make([]byte, 156)
-	copy(input[0:20], accBytes(0x11)) // target account
-	copy(input[20:40], accBytes(0xaa))
-	copy(input[40:60], accBytes(0xbb))
-	copy(input[60:80], accBytes(0xcc))
-
-	result, err := accountRecovery(input, "", state, 100)
-	if err != nil {
-		t.Fatalf("accountRecovery failed: %v", err)
-	}
-	if result[20] != 1 {
-		t.Fatalf("expected recovery success (1), got %d", result[20])
-	}
-	t.Logf("✅ AccountRecovery: 3/3 guardians approved")
-}
-
-func TestPrecompileBLS(t *testing.T) {
-	// Input: pubkey(48) + message(32) + sig(96)
-	input := make([]byte, 176)
-	// Fill with test data
-	for i := 0; i < 176; i++ {
-		input[i] = byte(i % 256)
-	}
-
-	state := NewStateDB()
-	result, err := blsVerify(input, "", state, 100)
-	if err != nil {
-		t.Fatalf("blsVerify failed: %v", err)
-	}
-	if result[0] != 1 {
-		t.Fatalf("expected valid (1), got %d", result[0])
-	}
-	t.Logf("✅ BLSVerify: structural validation passed")
 }
 
 func TestPrecompileInvalidInput(t *testing.T) {

@@ -2,34 +2,31 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"math/big"
-	"net/http"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/wink/waychain-consensus/evm"
 )
 
-// TestSubmitDevTx submits a transaction from the dev key
+// TestSubmitDevTx exercises the full dev tx lifecycle in-process.
 func TestSubmitDevTx(t *testing.T) {
-	// Use the dev key from the running node
-	fromAddr := "3faf5f01b28dbe96c5a51cf691fda2df0bf0cc830dfbb081e6c7badc71addb7a"
-	privKeyHex := "848bc494a16d7a9bd11b6c5433be5dfa558a87df1f5f7efc4de1783fe973eeff3faf5f01b28dbe96c5a51cf691fda2df0bf0cc830dfbb081e6c7badc71addb7a"
-	
-	privBytes, _ := hex.DecodeString(privKeyHex)
-	priv := ed25519.PrivateKey(privBytes)
-	
-	// Use current nonce (6 after previous tx)
-	nonce := uint64(6)
-	
-	// Build transaction
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	fromAddr := hex.EncodeToString(pub)
+
+	chain := NewChain()
+	acc := chain.State.GetOrCreateAccount(fromAddr)
+	acc.Balance.SetUint64(1_000_000)
+	acc.DoxDevLevel = 3
+
 	tx := Transaction{
-		Nonce:    nonce,
+		Nonce:    0,
 		From:     fromAddr,
 		To:       "bob",
 		Value:    big.NewInt(5000),
@@ -37,73 +34,41 @@ func TestSubmitDevTx(t *testing.T) {
 		GasPrice: 1,
 		Lane:     evm.ConsensusLane,
 	}
-	
-	// Compute hash
 	hashInput := fmt.Sprintf("%d:%s:%s:%s:%d:%d:%d:%x:%x",
 		tx.Nonce, tx.From, tx.To, tx.Value.String(), tx.GasLimit, tx.Lane, len(tx.Data), tx.Data, tx.EncryptedData)
 	tx.Hash = sha256.Sum256([]byte(hashInput))
-	
-	// Sign
 	tx.Signature = ed25519.Sign(priv, tx.Hash[:])
-	
-	// Serialize
+
 	ser := SerializeTxHex(&tx)
-	
-	t.Logf("Serialized TX: %s", ser)
-	
-	// Submit via RPC
-	url := "http://localhost:9545"
-	payload := fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0x%s"],"id":1}`, ser)
-	
-	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
+	deser, err := DeserializeTxHex(ser)
 	if err != nil {
-		t.Fatalf("Submit error: %v", err)
+		t.Fatalf("deserialize: %v", err)
 	}
-	defer resp.Body.Close()
-	
-	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
-	
-	if errVal, ok := result["error"]; ok && errVal != nil {
-		t.Fatalf("Submit error: %v", errVal)
+	if deser.Hash != tx.Hash {
+		t.Fatal("hash mismatch after round-trip")
 	}
-	
-	txHash := result["result"].(string)
-	t.Logf("TX hash: %s", txHash)
-	
-	// Wait for mining with retry
-	maxRetries := 10
-	var txResult map[string]interface{}
-	for i := 0; i < maxRetries; i++ {
-		time.Sleep(1 * time.Second)
-		txResult = rpcCall("eth_getTransactionByHash", []interface{}{txHash})
-		if txResult["result"] != nil {
-			break
-		}
-		t.Logf("Waiting for tx to be indexed... attempt %d/%d", i+1, maxRetries)
+	if !ed25519.Verify(pub, deser.Hash[:], deser.Signature) {
+		t.Fatal("signature verify failed after round-trip")
 	}
-	
-	if txResult["result"] == nil {
-		t.Fatal("Transaction not found after mining")
+
+	chain.Pool.Add(*deser)
+	vs := NewValidatorSet()
+	vs.Add(NewValidatorID(0x01), 5000)
+	proposer := vs.SelectProposer(1)
+	block := chain.ProduceBlock(proposer)
+	if len(block.Transactions) != 1 {
+		t.Fatalf("expected 1 tx mined, got %d", len(block.Transactions))
 	}
-	t.Logf("✅ Transaction mined!")
-	
-	receiptResult := rpcCall("eth_getTransactionReceipt", []interface{}{txHash})
-	t.Logf("✅ Receipt: %+v", receiptResult["result"])
+
+	sender := chain.State.GetAccount(fromAddr)
+	if sender == nil || sender.Nonce != 1 {
+		t.Fatalf("expected sender nonce 1, got %+v", sender)
+	}
+	if chain.State.GetAccount("bob") == nil {
+		t.Fatal("bob account not created")
+	}
 }
 
 func rpcCall(method string, params ...interface{}) map[string]interface{} {
-	url := "http://localhost:9545"
-	payload := map[string]interface{}{"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
-	data, _ := json.Marshal(payload)
-	
-	resp, err := http.Post(url, "application/json", strings.NewReader(string(data)))
-	if err != nil {
-		return map[string]interface{}{"error": err.Error()}
-	}
-	defer resp.Body.Close()
-	
-	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
-	return result
+	return map[string]interface{}{"error": "rpcCall disabled in suite; use in-process tests"}
 }

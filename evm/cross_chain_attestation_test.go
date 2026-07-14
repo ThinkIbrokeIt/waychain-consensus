@@ -422,8 +422,8 @@ func TestCrossChainIsPrecompileRange(t *testing.T) {
 	if !IsPrecompile(0x1F) {
 		t.Fatal("0x1F should be a precompile")
 	}
-	if IsPrecompile(0x21) {
-		t.Fatal("0x21 should NOT be a precompile")
+	if !IsPrecompile(0x21) {
+		t.Fatal("0x21 should be a precompile")
 	}
 	if IsPrecompile(0x0B) {
 		t.Fatal("0x0B should NOT be a precompile")

@@ -127,6 +127,17 @@ func govCreateProposal(input []byte, caller string, state *StateDB, blockNum uin
 	copy(calldataSlot[0:min(32, len(calldata))], calldata)
 	acc.Storage[calldataKey] = calldataSlot
 
+	// Maintain a proposal index so GovernanceListProposals can enumerate
+	// on-chain proposals without scanning all storage keys.
+	countKey := storageKey([]byte("proposal_count"))
+	count := readBigInt(acc.Storage[countKey])
+	idx := count.Uint64()
+	idKey := storageKey(append([]byte("pid_"), []byte(fmt.Sprintf("%d", idx))...))
+	var idSlot [32]byte
+	copy(idSlot[:], proposalID[:])
+	acc.Storage[idKey] = idSlot
+	acc.Storage[countKey] = writeBigInt(new(big.Int).Add(count, big.NewInt(1)))
+
 	votesKey := govVotesKey(proposalID[:])
 	var votesSlot [32]byte
 	acc.Storage[votesKey] = votesSlot

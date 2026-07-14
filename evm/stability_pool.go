@@ -15,6 +15,9 @@ const (
 	StabilitySlotDeposits     byte = 0x02 // user → deposit amount
 	StabilitySlotRewards      byte = 0x03 // user → pending rewards
 	StabilitySlotLastDeposit  byte = 0x04 // user → last deposit block
+	StabilitySlotMintedDebt   byte = 0x05 // user → active 2WAY minted debt (exclusivity lock)
+	StabilitySlotWayRewards   byte = 0x06 // protocol → WAY reward bucket
+	StabilitySlotSwayRewards  byte = 0x07 // protocol → SWAY reward bucket
 )
 
 // 2WAY Stability Pool ABI Selectors
@@ -67,6 +70,11 @@ func stabilityDeposit(input []byte, caller string, state *StateDB, blockNum uint
 
 	addr := PrecompileAddrHex(0x19)
 	acc := state.GetOrCreateAccount(addr)
+
+	// Exclusivity: a caller cannot be a 2WAY minter and a stability LP at the same time.
+	if stabilityMintedDebt(caller, state).Sign() > 0 {
+		return nil, fmt.Errorf("2WAY StabilityPool: caller has active 2WAY debt and cannot LP at the same time")
+	}
 
 	// Update user deposit
 	depositKey := stabilityDepositKey(caller)
@@ -143,13 +151,20 @@ func stabilityClaimRewards(input []byte, caller string, state *StateDB, blockNum
 
 	rewardKey := stabilityRewardKey(caller)
 	pendingRewards := readBigInt(acc.Storage[rewardKey])
+	lpFeeKey := storageKey(append([]byte{StabilitySlotLastDeposit}, []byte(caller)...))
+	mintLpRewards := readBigInt(acc.Storage[lpFeeKey])
+	pendingRewards = new(big.Int).Add(pendingRewards, mintLpRewards)
 
 	if pendingRewards.Sign() <= 0 {
 		return nil, fmt.Errorf("2WAY StabilityPool: no rewards to claim")
 	}
 
-	// Reset reward balance
+	// Reset reward balance and protocol buckets.
 	acc.Storage[rewardKey] = writeSlot(big.NewInt(0))
+	acc.Storage[lpFeeKey] = writeSlot(big.NewInt(0))
+	acc.Storage[storageKey([]byte("totalRewards"))] = writeSlot(big.NewInt(0))
+	acc.Storage[storageKey([]byte("wayRewards"))] = writeSlot(big.NewInt(0))
+	acc.Storage[storageKey([]byte("swayRewards"))] = writeSlot(big.NewInt(0))
 
 	// Emit event
 	state.AddLog(addr, [][32]byte{
@@ -214,9 +229,19 @@ func stabilityAbsorb(input []byte, caller string, state *StateDB, blockNum uint6
 
 // ── distributeRewards: accumulate rewards for distribution ──
 func distributeRewards(totalDeposits *big.Int, reward *big.Int, acc *Account) {
+	if reward.Sign() <= 0 || totalDeposits.Sign() <= 0 {
+		return
+	}
+	wayReward := new(big.Int).Div(new(big.Int).Set(reward), big.NewInt(2))
+	swayReward := new(big.Int).Sub(new(big.Int).Set(reward), wayReward)
+
+	wayKey := storageKey([]byte("wayRewards"))
+	swayKey := storageKey([]byte("swayRewards"))
 	totalRewardKey := storageKey([]byte("totalRewards"))
-	current := readBigInt(acc.Storage[totalRewardKey])
-	acc.Storage[totalRewardKey] = writeSlot(new(big.Int).Add(current, reward))
+
+	acc.Storage[wayKey] = writeSlot(new(big.Int).Add(readBigInt(acc.Storage[wayKey]), wayReward))
+	acc.Storage[swayKey] = writeSlot(new(big.Int).Add(readBigInt(acc.Storage[swayKey]), swayReward))
+	acc.Storage[totalRewardKey] = writeSlot(new(big.Int).Add(readBigInt(acc.Storage[totalRewardKey]), reward))
 }
 
 // ── GetDeposit: read user's deposit ──
@@ -245,7 +270,9 @@ func stabilityGetPoolStats(input []byte, caller string, state *StateDB) ([]byte,
 
 	totalDeposits := readBigInt(acc.Storage[storageKey([]byte("totalDeposits"))])
 	twoWayBalance := readBigInt(acc.Storage[storageKey([]byte("twoWayBalance"))])
-	totalRewards := readBigInt(acc.Storage[storageKey([]byte("totalRewards"))])
+	wayRewards := readBigInt(acc.Storage[storageKey([]byte("wayRewards"))])
+	swayRewards := readBigInt(acc.Storage[storageKey([]byte("swayRewards"))])
+	totalRewards := new(big.Int).Add(wayRewards, swayRewards)
 
 	out := make([]byte, 96)
 	totalDeposits.FillBytes(out[0:32])
@@ -264,4 +291,36 @@ func stabilityDepositKey(user string) [32]byte {
 
 func stabilityRewardKey(user string) [32]byte {
 	return storageKey(append([]byte{StabilitySlotRewards}, []byte(user)...))
+}
+
+func stabilityMintedDebtKey(user string) [32]byte {
+	return storageKey(append([]byte{StabilitySlotMintedDebt}, []byte(user)...))
+}
+
+func stabilityMintedDebt(user string, state *StateDB) *big.Int {
+	addr := PrecompileAddrHex(0x19)
+	acc := state.GetOrCreateAccount(addr)
+	if acc == nil {
+		return big.NewInt(0)
+	}
+	return readBigInt(acc.Storage[stabilityMintedDebtKey(user)])
+}
+
+func addStabilityMintedDebt(user string, amount *big.Int, state *StateDB) {
+	addr := PrecompileAddrHex(0x19)
+	acc := state.GetOrCreateAccount(addr)
+	key := stabilityMintedDebtKey(user)
+	acc.Storage[key] = writeSlot(new(big.Int).Add(readBigInt(acc.Storage[key]), amount))
+}
+
+func reduceStabilityMintedDebt(user string, amount *big.Int, state *StateDB) {
+	addr := PrecompileAddrHex(0x19)
+	acc := state.GetOrCreateAccount(addr)
+	key := stabilityMintedDebtKey(user)
+	current := readBigInt(acc.Storage[key])
+	newVal := new(big.Int).Sub(current, amount)
+	if newVal.Sign() < 0 {
+		newVal = big.NewInt(0)
+	}
+	acc.Storage[key] = writeSlot(newVal)
 }

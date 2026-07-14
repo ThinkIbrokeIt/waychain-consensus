@@ -239,6 +239,14 @@ func (c *Chain) InitPrecompiles() {
 	var st [32]byte
 	new(big.Int).SetUint64(startTime).FillBytes(st[:])
 	endowAcc.Storage[[32]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}] = st
+
+	// ── WIFR Gauntlet (0x21): create account and initialize pools ──
+	wifrAddr := evm.PrecompileAddrHex(0x21)
+	wifrAcc := c.State.GetOrCreateAccount(wifrAddr)
+	_ = wifrAcc
+	if err := (&evm.WIFRGantletRewards{State: c.State}).Initialize(); err != nil {
+		panic(err)
+	}
 }
 
 func (c *Chain) issueGenesisBadge(badgeAcc *evm.Account, developer string, level uint8, validityPeriod uint64) {
@@ -297,6 +305,9 @@ func (c *Chain) OpenStore(dbPath string) (*store.Store, error) {
 		c.Height = s.Height()
 		// Rebuild EVM with loaded state
 		c.EVM = evm.NewEVM(state, evm.ConsensusLane, c.Height+1, uint64(time.Now().Unix()), 10008, 30_000_000, "")
+		if err := (&evm.WIFRGantletRewards{State: c.State}).EnsureInitialized(); err != nil {
+			return nil, fmt.Errorf("chain: init wifr: %w", err)
+		}
 
 		// Log latest blocks
 		blocks, _ := s.LatestBlocks(5)

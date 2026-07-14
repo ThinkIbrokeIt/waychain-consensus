@@ -165,6 +165,18 @@ func twoWayMint(input []byte, caller string, state *StateDB, blockNum uint64) ([
 	vaultID := input[4:36]
 	amount := readBigInt(readSlot(input, 36))
 
+	// Users can either provide LP liquidity or mint 2WAY, but not both.
+	if stabilityMintedDebt(caller, state).Sign() > 0 {
+		return nil, fmt.Errorf("2WAY: caller has active 2WAY debt and cannot mint more until repaid")
+	}
+	addr19 := PrecompileAddrHex(0x19)
+	stabilityAcc := state.GetOrCreateAccount(addr19)
+	if stabilityAcc != nil {
+		if readBigInt(stabilityAcc.Storage[stabilityDepositKey(caller)]).Sign() > 0 {
+			return nil, fmt.Errorf("2WAY: caller is already providing LP liquidity and cannot mint 2WAY at the same time")
+		}
+	}
+
 	// Get vault state
 	collaterals := getVaultCollaterals(vaultID, state)
 	vaultDebt := getVaultDebt(vaultID, state)
@@ -178,19 +190,39 @@ func twoWayMint(input []byte, caller string, state *StateDB, blockNum uint64) ([
 		return nil, fmt.Errorf("2WAY: vault has no collateral")
 	}
 
+	// Protocol fee on mint — split early rewards between WAY and SWAY buckets.
+	feeBps := uint64(150)
+	for stablecoin := range collaterals {
+		if param := getCollateralParam(stablecoin, state); param.StabilityFee > 0 {
+			feeBps = uint64(param.StabilityFee)
+			break
+		}
+	}
+	protocolFee := new(big.Int).Mul(amount, big.NewInt(int64(feeBps)))
+	protocolFee = protocolFee.Div(protocolFee, big.NewInt(10000))
+	if protocolFee.Sign() > 0 && stabilityAcc != nil {
+		wayReward := new(big.Int).Div(new(big.Int).Set(protocolFee), big.NewInt(2))
+		swayReward := new(big.Int).Sub(new(big.Int).Set(protocolFee), wayReward)
+		stabilityAcc.Storage[storageKey([]byte("wayRewards"))] = writeSlot(new(big.Int).Add(readBigInt(stabilityAcc.Storage[storageKey([]byte("wayRewards"))]), wayReward))
+		stabilityAcc.Storage[storageKey([]byte("swayRewards"))] = writeSlot(new(big.Int).Add(readBigInt(stabilityAcc.Storage[storageKey([]byte("swayRewards"))]), swayReward))
+		stabilityAcc.Storage[storageKey([]byte("totalRewards"))] = writeSlot(new(big.Int).Add(readBigInt(stabilityAcc.Storage[storageKey([]byte("totalRewards"))]), protocolFee))
+		// Mint-side LP state: track the protocol fee as routed liquidity for the caller's vault.
+		lpKey := storageKey(append([]byte{StabilitySlotLastDeposit}, []byte(caller)...))
+		stabilityAcc.Storage[lpKey] = writeSlot(new(big.Int).Add(readBigInt(stabilityAcc.Storage[lpKey]), protocolFee))
+	}
+
 	// Check C-Ratio after minting
 	newDebt := new(big.Int).Add(vaultDebt, amount)
 	if !isAboveMinCRatio(collaterals, newDebt, big.NewInt(0), state) {
 		return nil, fmt.Errorf("2WAY: mint would violate minimum collateral ratio")
 	}
 
-	// Update debt
+	// Update debt and lock
 	addr := PrecompileAddrHex(0x18)
 	acc := state.GetOrCreateAccount(addr)
 	acc.Storage[debtKey(vaultID)] = writeSlot(newDebt)
-
-	// Update total debt
 	addTotalDebt(amount, state)
+	addStabilityMintedDebt(caller, amount, state)
 
 	// Emit event
 	state.AddLog(addr, [][32]byte{
@@ -275,6 +307,9 @@ func twoWayBurn(input []byte, caller string, state *StateDB, blockNum uint64) ([
 		newDebt = big.NewInt(0)
 	}
 	acc.Storage[vaultDebtKey] = writeSlot(newDebt)
+
+	// Reduce exclusivity lock on the caller in the stability pool.
+	reduceStabilityMintedDebt(caller, amount, state)
 
 	// Update total debt
 	reduceTotalDebt(amount, state)
