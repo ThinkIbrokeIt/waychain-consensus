@@ -84,7 +84,13 @@ func swayPrecompile(input []byte, caller string, state *StateDB, blockNum uint64
 
 	case selSwayGetTotalSupply:
 		totalKey := storageKey([]byte("sway:totalSupply"))
-		total := readBigInt(state.GetAccount(PrecompileAddrHex(0x24)).Storage[totalKey])
+		acc := state.GetAccount(PrecompileAddrHex(0x24))
+		var total *big.Int
+		if acc == nil {
+			total = big.NewInt(0)
+		} else {
+			total = readBigInt(acc.Storage[totalKey])
+		}
 		out := make([]byte, 32)
 		total.FillBytes(out)
 		return out, nil
