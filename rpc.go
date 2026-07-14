@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 	"nhooyr.io/websocket"
 )
 

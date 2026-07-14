@@ -1,4 +1,4 @@
-module github.com/wink/waychain-consensus
+module github.com/ThinkIbrokeIt/waychain-consensus
 
 go 1.26.4
 

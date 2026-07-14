@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // ── Binary Wire Format for Transaction ──

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 	"go.etcd.io/bbolt"
 )
 

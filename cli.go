@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	st "github.com/wink/waychain-consensus/store"
+	st "github.com/ThinkIbrokeIt/waychain-consensus/store"
 )
 
 // RunCLI handles command-line arguments for the waychain binary

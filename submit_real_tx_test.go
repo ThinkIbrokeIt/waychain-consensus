@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // TestSubmitDevTx exercises the full dev tx lifecycle in-process.

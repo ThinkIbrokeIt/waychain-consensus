@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // TestLaneRouting verifies transactions route to correct pool lanes

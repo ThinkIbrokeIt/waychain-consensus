@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/wink/waychain-consensus/evm"
-	"github.com/wink/waychain-consensus/oracle"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/oracle"
 )
 
 func RunOracleDemo() {

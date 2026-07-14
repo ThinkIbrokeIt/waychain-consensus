@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // TestTransactionPipeline verifies the full tx lifecycle end-to-end:

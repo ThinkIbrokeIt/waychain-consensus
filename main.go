@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 func runConsensusDemo() {

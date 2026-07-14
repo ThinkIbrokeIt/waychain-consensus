@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // OracleStatus represents the oracle's current state

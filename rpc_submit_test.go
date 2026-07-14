@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/wink/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // TestRPCSubmitWithFund verifies transaction serialization and signature verification

@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	st "github.com/wink/waychain-consensus/store"
+	st "github.com/ThinkIbrokeIt/waychain-consensus/store"
 )
 
 // TestFundEd25519Account funds an Ed25519 account in the BoltDB

@@ -8,8 +8,8 @@ import (
 
 	"math/big"
 
-	"github.com/wink/waychain-consensus/evm"
-	"github.com/wink/waychain-consensus/store"
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
+	"github.com/ThinkIbrokeIt/waychain-consensus/store"
 )
 
 // Transaction is a WayChain transaction
