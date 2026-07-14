@@ -41,7 +41,15 @@ func TestWIFRPrecompileRange(t *testing.T) {
 	if !IsPrecompile(0x21) {
 		t.Fatal("0x21 should be a precompile")
 	}
-	if IsPrecompile(0x22) {
-		t.Fatal("0x22 should not be a precompile")
+	// 0x22–0x26 are the token precompiles (1WAY, TaskRegistry, SWAY,
+	// SwapRoute, TemplateRegistry) — registered from the client codebase.
+	if !IsPrecompile(0x22) {
+		t.Fatal("0x22 (1WAY stablecoin) should be a precompile")
+	}
+	if !IsPrecompile(0x26) {
+		t.Fatal("0x26 (TemplateRegistry) should be a precompile")
+	}
+	if IsPrecompile(0x27) {
+		t.Fatal("0x27 should not be a precompile")
 	}
 }

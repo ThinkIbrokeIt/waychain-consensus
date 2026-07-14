@@ -151,11 +151,42 @@ var PrecompilesTable = map[byte]*Precompile{
 		Gas:     1000,
 		Fn:      wifrGauntletPrecompile,
 	},
+	// ── Token precompiles (0x22–0x26) — ported from waychain-client ──
+	0x22: {
+		Address: 0x22,
+		Name:    "WayStablecoin", // 1WAY — Bitcoin-backed stablecoin
+		Gas:     8000,
+		Fn:      wayStablecoinPrecompile,
+	},
+	0x23: {
+		Address: 0x23,
+		Name:    "TaskRegistry",
+		Gas:     5000,
+		Fn:      taskRegistryPrecompile,
+	},
+	0x24: {
+		Address: 0x24,
+		Name:    "SwayToken", // DEX LP incentive token
+		Gas:     5000,
+		Fn:      swayPrecompile,
+	},
+	0x25: {
+		Address: 0x25,
+		Name:    "SwapRoute", // DEX swap + LP rewards
+		Gas:     6000,
+		Fn:      swapRoutePrecompile,
+	},
+	0x26: {
+		Address: 0x26,
+		Name:    "TemplateRegistry",
+		Gas:     5000,
+		Fn:      templateRegistryPrecompile,
+	},
 }
 
 // IsPrecompile returns true if the address is a precompile
 func IsPrecompile(addr byte) bool {
-	return addr >= 0x0C && addr <= 0x21
+	return addr >= 0x0C && addr <= 0x26
 }
 
 // ── 0x21: WIFR Gauntlet Rewards ──
