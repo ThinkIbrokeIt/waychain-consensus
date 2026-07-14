@@ -1,0 +1,57 @@
+name: Audit
+
+# Recurring source-of-truth audit. Runs daily + on demand.
+# Checks code vs docs consistency (e.g. precompile count drift).
+# On drift it fails the job so the failure is visible; the workflow
+# then files/updates a tracking issue so nothing hides in someone's head.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'   # 06:17 UTC daily (off the :00 mark on purpose)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run consistency audit
+        id: audit
+        continue-on-error: true
+        run: |
+          if bash scripts/audit-consistency.sh; then
+            echo "result=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: File or update drift issue
+        if: steps.audit.outputs.result == 'fail'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          TITLE="Audit drift: code vs docs inconsistent"
+          BODY="The scheduled consistency audit detected drift between code and docs.
+
+          Re-run: https://github.com/$REPO/actions/workflows/audit.yml
+
+          Action: investigate scripts/audit-consistency.sh output and reconcile.
+          This issue is reopened/updated automatically by the Audit workflow."
+
+          # Find an existing open drift issue, else create one.
+          EXISTING=$(gh issue list --repo "$REPO" --state open --search "Audit drift in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body "Drift detected again at $(date -u). Re-run: https://github.com/$REPO/actions/workflows/audit.yml"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "audit"
+          fi
+
+      - name: Report pass
+        if: steps.audit.outputs.result == 'pass'
+        run: echo "✅ Audit passed — code and docs consistent"
