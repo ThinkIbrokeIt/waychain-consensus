@@ -42,7 +42,7 @@ var PrecompilesTable = map[byte]*Precompile{
 	},
 	0x10: {
 		Address: 0x10,
-		Name:    "BLSVerify",
+		Name:    "AggregateSignatureVerify",
 		Gas:     15000,
 		Fn:      blsVerify,
 	},
