@@ -4,7 +4,7 @@
 WayChain is a Layer 1 blockchain built in Go with a custom EVM execution layer. It implements:
 - **Consensus**: Custom BFT-style consensus with validator rotation
 - **EVM**: Full bytecode interpreter with WayChain-native opcodes (0xF0-0xFF)
-- **Precompiles**: 20 protocol precompiles at addresses 0x0C–0x20 (Oracle, Dox_Dev, BIJO, DMS, Bitcoin Registry, Storage Endowment, TwoWayVault, StabilityPool, TrustlessLock, AccountManager, Privacy, Governance, StateRent, CrossChainAttestation, MineralRights)
+- **Precompiles**: 27 protocol precompiles at addresses 0x0C–0x26 (Oracle, Dox_Dev, BIJO, DMS, Bitcoin Registry, Storage Endowment, TwoWayVault, StabilityPool, TrustlessLock, AccountManager, Privacy, Governance, StateRent, CrossChainAttestation, MineralRights, WIFR Gauntlet, 1WAY stablecoin, TaskRegistry, SWAY, SwapRoute, TemplateRegistry)
 - **Storage**: BoltDB (bbolt) persistent state with transaction indexing
 - **RPC**: JSON-RPC over HTTP + WebSocket (eth_* + way_* methods)
 - **P2P**: libp2p-based gossip for block/tx propagation
@@ -26,7 +26,7 @@ WayChain is a Layer 1 blockchain built in Go with a custom EVM execution layer. 
 ├── store/store.go              # BoltDB persistence (accounts, blocks, tx_index, meta)
 ├── evm/
 │   ├── interpreter.go          # EVM bytecode interpreter + WayChain native opcodes
-│   ├── precompiles.go          # 20 precompiles (0x0C–0x20) + ABI selectors
+│   ├── precompiles.go          # 27 precompiles (0x0C–0x26) + ABI selectors
 │   ├── governance.go           # Governance precompile (0x1D) + curator no-gatekeeping
 │   ├── state_rent.go           # State rent calculation + payment
 │   ├── oracle_scheduler.go     # Time-based oracle task scheduling
@@ -70,14 +70,14 @@ Transaction.Lane determines which pool it enters and which EVM instance executes
 - **Class B (1)**: Custom bytecode — requires Level 3 (curator) or governance approval (enforced by `EnforceContractClass` in `evm/evm.go`)
 - Enforced in `EnforceContractClass(level, class)` and `CanDeployContract(level)`
 
-### Precompile Addresses (0x0C–0x20)
+### Precompile Addresses (0x0C–0x26)
 | Addr | Name | Purpose |
 |------|------|---------|
 | 0x0C | OracleAggregator | Aggregate multi-oracle attestations |
 | 0x0D | OracleScheduler | Schedule recurring oracle tasks |
 | 0x0E | OracleVerifier | Verify single oracle attestation |
 | 0x0F | TLSVerifier | Verify TLS notary proofs |
-| 0x10 | BLSVerify | BLS12-381 signature verification |
+| 0x10 | AggregateSignatureVerify | ed25519 aggregate signature verification (chain identity scheme) |
 | 0x11 | AccountRecovery | Guardian-based recovery (3-of-5) |
 | 0x12 | StateRentCalc | Calculate rent due |
 | 0x13 | DoxDevBadge | Identity/developer verification |
@@ -94,6 +94,12 @@ Transaction.Lane determines which pool it enters and which EVM instance executes
 | 0x1E | StateRent | Rent collection & eviction |
 | 0x1F | CrossChainAttestation | Cross-chain proof verification |
 | 0x20 | MineralRightsRegistry | Tokenized mineral rights |
+| 0x21 | WIFRGantletRewards | WIFR gauntlet pioneer rewards |
+| 0x22 | WayStablecoin (1WAY) | Bitcoin-backed stablecoin: BTC locked → 1WAY minted |
+| 0x23 | TaskRegistry | Decentralized task registry |
+| 0x24 | SwayToken (SWAY) | DEX LP incentive token |
+| 0x25 | SwapRoute | DEX swap + LP rewards |
+| 0x26 | TemplateRegistry | Contract template registry |
 
 ### ABI Selectors
 WayChain uses **sha256(signature)[:4]** NOT keccak256. All selectors in `precompiles.go` are precomputed constants.
@@ -186,7 +192,7 @@ Curator applications: any Level 2+ can apply; community elects via quadratic vot
 ### Critical Files to Read First
 1. `chain.go` — Core loop, block production, tx pool, staking
 2. `evm/interpreter.go` — Opcodes, precompile CALL handling, native ops
-3. `evm/precompiles.go` — All 20 precompiles, selectors, storage helpers
+3. `evm/precompiles.go` — All 27 precompiles, selectors, storage helpers
 4. `evm/governance.go` — Governance logic, curator no-gatekeeping
 5. `rpc.go` — JSON-RPC methods, tx submission, P2P broadcast (eth_sendRawTransaction, eth_getTransactionByHash, eth_getTransactionReceipt now fixed)
 6. `store/store.go` — Persistence, serialization, tx indexing (transaction data now persistently stored)
