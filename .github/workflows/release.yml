@@ -31,6 +31,8 @@ jobs:
           cd ..
 
       - name: Build binary (CGO_ENABLED=1 — required for EVM execution)
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/revm-ffi/target/release:${LD_LIBRARY_PATH:-}
         run: |
           mkdir -p release
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o release/waychain .

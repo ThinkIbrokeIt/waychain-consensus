@@ -35,10 +35,14 @@ jobs:
           ls -la revm-ffi/target/release/librevm_ffi.so
 
       - name: Build WayChain daemon (Go + CGo)
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/revm-ffi/target/release:${LD_LIBRARY_PATH:-}
         run: CGO_ENABLED=1 go build -o waychain .
 
       - name: Vet
         run: go vet ./...
 
       - name: Test
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/revm-ffi/target/release:${LD_LIBRARY_PATH:-}
         run: CGO_ENABLED=1 go test -count=1 ./...
