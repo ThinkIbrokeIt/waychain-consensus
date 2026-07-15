@@ -9,6 +9,19 @@ WayChain is a Layer 1 blockchain built in Go with a custom EVM execution layer. 
 - **RPC**: JSON-RPC over HTTP + WebSocket (eth_* + way_* methods)
 - **P2P**: libp2p-based gossip for block/tx propagation
 
+## Source of Truth (issue #23)
+| Layer | Canonical | Not SoT |
+|---|---|---|
+| Protocol code | **this repo `master`** + `protocol-manifest.json` | monorepo `waychain/consensus`, chat, stale audits |
+| Live deploy | **AWS 3.89.116.45** `/usr/local/bin/waychain` sha256 | "merged on GitHub" alone |
+| Site | `ThinkIbrokeIt/waychain-site` `main` | master lag / monorepo site copy |
+| Mobile | `ThinkIbrokeIt/waychain-mobile` `main` | unsigned ad-hoc builds |
+| Work tracking | GitHub Issues + PRs | head memory |
+
+`protocol-manifest.json` is generated from `evm/precompiles.go`. CI runs `scripts/audit-consistency.sh` on every PR. Drift = red.
+
+**Address model (live-proven):** EOA account key / `tx.from` / `way_getBalance` = **full 64-hex** ed25519 pubkey. 20-byte form is **display only**. Precompile calldata address args = raw 20-byte. Selectors = `sha256(sig)[:4]` (not keccak). **0x21 = WIFRGantletRewards** (not Keccak256).
+
 ## Tech Stack
 - **Language**: Go 1.26.4
 - **ZK Circuits**: gnark (groth16) for balance/identity/range/membership proofs
