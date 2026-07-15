@@ -537,8 +537,10 @@ func stateRentCalc(input []byte, caller string, state *StateDB, blockNum uint64)
 
 // PrecompileNames returns a formatted list of all precompiles
 func PrecompileNames() string {
-	result := "\nWayChain Precompiles (0x0C-0x20):\n"
-	for addr := byte(0x0C); addr <= 0x20; addr++ {
+	// Range must match PrecompilesTable + protocol-manifest.json (0x0C-0x26).
+	// Stale "0x0C-0x20" banners are caught by scripts/audit-consistency.sh (issue #24).
+	result := "\nWayChain Precompiles (0x0C-0x26):\n"
+	for addr := byte(0x0C); addr <= 0x26; addr++ {
 		if pc, ok := PrecompilesTable[addr]; ok {
 			result += fmt.Sprintf("  0x%02X — %s (gas: %d)\n", addr, pc.Name, pc.Gas)
 		}

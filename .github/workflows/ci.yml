@@ -42,6 +42,10 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: SoT consistency audit (protocol-manifest + precompile drift)
+        # PR-time hard fail — do not wait for the nightly audit job (issue #23/#24).
+        run: bash scripts/audit-consistency.sh
+
       - name: Test
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/revm-ffi/target/release:${LD_LIBRARY_PATH:-}
