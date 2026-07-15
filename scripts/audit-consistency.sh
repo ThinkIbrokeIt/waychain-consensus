@@ -73,27 +73,25 @@ fi
 
 echo "=== Audit: AGENTS must not claim Keccak at 0x21 ==="
 # Allow explicit denials ("not Keccak256" / "≠ Keccak") — only fail positive claims.
-if python3 - <<'PY'
-import re,sys
-text=open('AGENTS.md').read().splitlines()
-bad=[]
-for i,l in enumerate(text,1):
+# (Do NOT wrap in `if cmd; then exit 1` — that inverts set -e.)
+python3 - <<'PY'
+import re, sys
+text = open('AGENTS.md').read().splitlines()
+bad = []
+for i, l in enumerate(text, 1):
     if not re.search(r'0x21', l, re.I):
         continue
     if not re.search(r'Keccak', l, re.I):
         continue
-    # denial forms are OK
     if re.search(r'not\s+Keccak|≠\s*Keccak|!=\s*Keccak|isn.?t\s+Keccak|no longer\s+Keccak', l, re.I):
         continue
     bad.append(f'{i}:{l.strip()[:160]}')
 if bad:
     print('::error::AGENTS.md positively claims Keccak at 0x21:')
-    print('\n'.join(bad)); sys.exit(1)
+    print('\n'.join(bad))
+    sys.exit(1)
 print('AGENTS.md: no positive Keccak@0x21 claim')
 PY
-then
-  exit 1
-fi
 
 echo "✅ Consistency audit passed (count=$CODE_COUNT, range=0x0C-0x26)"
 exit 0
