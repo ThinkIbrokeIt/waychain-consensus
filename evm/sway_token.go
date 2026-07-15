@@ -46,7 +46,7 @@ func swayPrecompile(input []byte, caller string, state *StateDB, blockNum uint64
 		newBal := new(big.Int).Add(current, amount)
 		state.GetOrCreateAccount(toAddr).Storage[balanceKey] = writeBigInt(newBal)
 
-		total := readBigInt(state.GetAccount(PrecompileAddrHex(0x24)).Storage[totalKey])
+		total := readBigInt(state.GetOrCreateAccount(PrecompileAddrHex(0x24)).Storage[totalKey])
 		newTotal := new(big.Int).Add(total, amount)
 		state.GetOrCreateAccount(PrecompileAddrHex(0x24)).Storage[totalKey] = writeBigInt(newTotal)
 
@@ -68,7 +68,7 @@ func swayPrecompile(input []byte, caller string, state *StateDB, blockNum uint64
 		newBal := new(big.Int).Sub(current, amount)
 		state.GetOrCreateAccount(fromAddr).Storage[balanceKey] = writeBigInt(newBal)
 
-		total := readBigInt(state.GetAccount(PrecompileAddrHex(0x24)).Storage[totalKey])
+		total := readBigInt(state.GetOrCreateAccount(PrecompileAddrHex(0x24)).Storage[totalKey])
 		newTotal := new(big.Int).Sub(total, amount)
 		state.GetOrCreateAccount(PrecompileAddrHex(0x24)).Storage[totalKey] = writeBigInt(newTotal)
 
@@ -76,8 +76,15 @@ func swayPrecompile(input []byte, caller string, state *StateDB, blockNum uint64
 
 	case selSwayGetBalance:
 		addr := readAddress(input, 4)
+		addrHex := fmt.Sprintf("%x", addr[:])
 		balanceKey := storageKey(append([]byte{0x30}, addr[:]...))
-		balance := readBigInt(state.GetAccount(fmt.Sprintf("%x", addr[:])).Storage[balanceKey])
+		acc := state.GetAccount(addrHex)
+		var balance *big.Int
+		if acc == nil {
+			balance = big.NewInt(0)
+		} else {
+			balance = readBigInt(acc.Storage[balanceKey])
+		}
 		out := make([]byte, 32)
 		balance.FillBytes(out)
 		return out, nil
@@ -114,7 +121,7 @@ func swayPrecompile(input []byte, caller string, state *StateDB, blockNum uint64
 		current := readBigInt(state.GetOrCreateAccount(caller).Storage[balanceKey])
 		newBal := new(big.Int).Add(current, amount)
 		state.GetOrCreateAccount(caller).Storage[balanceKey] = writeBigInt(newBal)
-		total := readBigInt(state.GetAccount(PrecompileAddrHex(0x24)).Storage[totalKey])
+		total := readBigInt(state.GetOrCreateAccount(PrecompileAddrHex(0x24)).Storage[totalKey])
 		newTotal := new(big.Int).Add(total, amount)
 		state.GetOrCreateAccount(PrecompileAddrHex(0x24)).Storage[totalKey] = writeBigInt(newTotal)
 		return []byte{1}, nil
