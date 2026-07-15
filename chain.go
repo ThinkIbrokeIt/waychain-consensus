@@ -153,6 +153,11 @@ type Chain struct {
 
 	// Callbacks for real-time event streaming
 	OnNewBlock func(block *BlockWithTx)
+
+	// ActiveValidators is the current epoch's active set, set by the consensus
+	// layer before ProduceBlock. Used for on-chain liveness accounting
+	// (quest top-tier 72h uptime proof). Nil/empty = no accounting.
+	ActiveValidators []*ValidatorID
 }
 
 // NewChain creates a new chain instance
@@ -421,6 +426,14 @@ func (c *Chain) DeployTestContract(deployer string) (string, error) {
 // ProduceBlock builds and executes a new block with pending transactions
 func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 	c.Height++
+
+	// Liveness accounting: every active validator accrues one uptime block.
+	// Used by the quest top-tier ladder (72h no-downtime proof, on-chain).
+	for _, v := range c.ActiveValidators {
+		if v != nil {
+			evm.IncrementValidatorUptime(c.State, string(v.Bytes()))
+		}
+	}
 
 	var prevHash [32]byte
 	if len(c.Blocks) > 0 {

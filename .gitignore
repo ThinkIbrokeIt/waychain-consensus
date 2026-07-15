@@ -26,3 +26,5 @@ evm/circuits/*
 
 # Agent scratch
 .hermes/
+# Build artifacts
+waychain-linux-amd64
