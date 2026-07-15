@@ -100,6 +100,10 @@ func (cm *ConsensusManager) runBlockRound() {
 
 // proposeBlock creates and broadcasts a new block proposal
 func (cm *ConsensusManager) proposeBlock(height uint64, proposer ValidatorID) {
+	// Expose the active set to the chain for liveness accounting.
+	if cm.Engine != nil {
+		cm.Chain.ActiveValidators = cm.Engine.ActiveSet
+	}
 	// Build block from chain
 	block := cm.Chain.ProduceBlock(proposer)
 	if block == nil {
