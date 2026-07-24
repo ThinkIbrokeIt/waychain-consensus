@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 import (
@@ -17,6 +18,7 @@ const (
 	WaySlotUserHasVault   byte = 0x03
 	WaySlotBTCPrice       byte = 0x04
 	WaySlotTotalCommitted byte = 0x05
+	WaySlotVaultCreator  byte = 0x06 // vaultID -> creator account (64-hex EOA key)
 )
 
 // Collateral parameters
@@ -34,6 +36,7 @@ const (
 	selWayGetUserVault   uint32 = 0xA8B7C9D0
 	selWayGetPrice       uint32 = 0xB9C8D0E1
 	selWayGetTotalSupply uint32 = 0xCAD9E0F2
+	selWayGetVault       uint32 = 0x9EB29EF0 // getVault(bytes32) -> (btc[32], debt[32], creatorPresent[32])
 	selWayUpdateBTCPrice uint32 = 0xDBC0F1A2
 )
 
@@ -54,6 +57,8 @@ func wayStablecoinPrecompile(input []byte, caller string, state *StateDB, blockN
 		return wayBurn1Way(input, caller, state, blockNum)
 	case selWayGetUserVault:
 		return wayGetUserVault(input, caller, state)
+	case selWayGetVault:
+		return wayGetVault(input, state)
 	case selWayGetPrice:
 		return wayGetPrice(input, caller, state)
 	case selWayGetTotalSupply:
@@ -63,6 +68,42 @@ func wayStablecoinPrecompile(input []byte, caller string, state *StateDB, blockN
 	default:
 		return nil, fmt.Errorf("1WAY: unknown selector 0x%08X", sel)
 	}
+}
+
+// requireCallerIsCreatorOrDeadMan enforces the founder access rule (2026-07-18):
+// a vault op may ONLY be called by the vault's creator, OR by the
+// DeadMansSwitch for that vault (which can only be SET by the creator).
+// Anyone else is rejected — no operating on a vault you did not create.
+func requireCallerIsCreatorOrDeadMan(state *StateDB, vaultID []byte, caller string) error {
+	addr := PrecompileAddrHex(0x22)
+	acc := state.GetOrCreateAccount(addr)
+	creatorKey := storageKey(append([]byte{WaySlotVaultCreator}, vaultID...))
+	cval := acc.Storage[creatorKey]
+	creator := string(cval[:])
+	if creator == caller {
+		return nil
+	}
+	// Dead-man's-switch path: only if it is active AND was set by the creator.
+	if creator != "" && deadManActiveForVault(state, vaultID) {
+		return nil
+	}
+	return fmt.Errorf("1WAY: caller is not vault creator or authorized dead-man's-switch")
+}
+
+// deadManActiveForVault reports whether the owner-set dead-man's-switch for
+// this vault is currently active. The switch can ONLY be set by the creator
+// (enforced in precompiles.go 0x15 SET path), so an active switch
+// authorizes vault ops on behalf of an incapacitated creator.
+func deadManActiveForVault(state *StateDB, vaultID []byte) bool {
+	dmAddr := PrecompileAddrHex(0x15)
+	dmAcc := state.GetOrCreateAccount(dmAddr)
+	swKey := storageKey(append([]byte{0x10}, vaultID...))
+	raw := dmAcc.Storage[swKey]
+	// bytes[0] = active flag (1 = active); zero-value [32]byte => not set.
+	if len(raw) == 0 || raw[0] != 1 {
+		return false
+	}
+	return true
 }
 
 // ── Create vault ──
@@ -91,35 +132,58 @@ func wayCreateVault(input []byte, caller string, state *StateDB, blockNum uint64
 	debtKey := storageKey(append([]byte{WaySlotVault1Way}, vaultID...))
 	acc.Storage[debtKey] = writeBigInt(big.NewInt(0))
 
+	// Record the creator (founder rule: only creator — or owner-set dead-man's-switch — may operate this vault).
+	creatorKey := storageKey(append([]byte{WaySlotVaultCreator}, vaultID...))
+	var cbuf [32]byte
+	copy(cbuf[:], []byte(caller))
+	acc.Storage[creatorKey] = cbuf
+
 	acc.Storage[usrVaultKey] = writeUint64(1)
 
 	return vaultID, nil
 }
 
 // ── Deposit BTC ──
+// NEW trustless ABI (2026-07-18): vaultID[32] + amount[32] + txid[32] + outIndex[8] + toAddr.
+// A deposit is ONLY accepted with a sha256 proof (VerifyBTCDeposit) that REAL BTC
+// arrived at THIS vault's derived address. No proof => rejected (no "promise" deposit).
 func wayDepositBTC(input []byte, caller string, state *StateDB, blockNum uint64) ([]byte, error) {
-	if len(input) < 68 {
-		return nil, fmt.Errorf("1WAY: depositBTC input too short")
+	if len(input) < 100 {
+		return nil, fmt.Errorf("1WAY: depositBTC needs vaultID+amount+txid+outIndex+toAddr (>=100 bytes)")
 	}
 
 	vaultID := input[4:36]
 	amount := readUint256(input, 36)
+
+	// Access control: only the vault creator (or owner-set dead-man's-switch) may deposit.
+	if err := requireCallerIsCreatorOrDeadMan(state, vaultID, caller); err != nil {
+		return nil, err
+	}
+
+	// Trustless check: prove real BTC landed at this vault's derived address.
+	proof := BTCTxProof{
+		TxID:  input[68:100],
+		OutIndex: readUint64FromBytes(input, 100),
+		ToAddr: string(input[108:]),
+		Amount: amount,
+	}
+	verified, err := VerifyBTCDeposit(vaultID, proof)
+	if err != nil {
+		return nil, err
+	}
+
 	addr := PrecompileAddrHex(0x22)
 	acc := state.GetOrCreateAccount(addr)
 
-	usrVaultKey := storageKey(append([]byte{WaySlotUserHasVault}, []byte(caller)...))
-	if readUint64(acc.Storage[usrVaultKey]) != 1 {
-		return nil, fmt.Errorf("1WAY: caller has no vault")
-	}
-
+	// Use the VERIFIED amount (defends against a stated amount that disagrees with the proof).
 	btcKey := storageKey(append([]byte{WaySlotVaultBTC}, vaultID...))
 	currentBTC := readBigInt(acc.Storage[btcKey])
-	currentBTC.Add(currentBTC, amount)
+	currentBTC.Add(currentBTC, verified)
 	acc.Storage[btcKey] = writeBigInt(currentBTC)
 
 	totalKey := storageKey([]byte("total:committed"))
 	totalBTC := readBigInt(acc.Storage[totalKey])
-	totalBTC.Add(totalBTC, amount)
+	totalBTC.Add(totalBTC, verified)
 	acc.Storage[totalKey] = writeBigInt(totalBTC)
 
 	return []byte{1}, nil
@@ -134,6 +198,11 @@ func wayMint1Way(input []byte, caller string, state *StateDB, blockNum uint64) (
 	vaultID := input[4:36]
 	addr := PrecompileAddrHex(0x22)
 	acc := state.GetOrCreateAccount(addr)
+
+	// Access control: only the vault creator (or owner-set dead-man's-switch) may mint.
+	if err := requireCallerIsCreatorOrDeadMan(state, vaultID, caller); err != nil {
+		return nil, err
+	}
 
 	btcKey := storageKey(append([]byte{WaySlotVaultBTC}, vaultID...))
 	btcAmount := readBigInt(acc.Storage[btcKey])
@@ -175,6 +244,11 @@ func wayBurn1Way(input []byte, caller string, state *StateDB, blockNum uint64) (
 	addr := PrecompileAddrHex(0x22)
 	acc := state.GetOrCreateAccount(addr)
 
+	// Access control: only the vault creator (or owner-set dead-man's-switch) may burn.
+	if err := requireCallerIsCreatorOrDeadMan(state, vaultID, caller); err != nil {
+		return nil, err
+	}
+
 	debtKey := storageKey(append([]byte{WaySlotVault1Way}, vaultID...))
 	currentDebt := readBigInt(acc.Storage[debtKey])
 	newDebt := new(big.Int).Sub(currentDebt, amount)
@@ -204,6 +278,40 @@ func wayGetUserVault(input []byte, caller string, state *StateDB) ([]byte, error
 		output[0] = 1
 	}
 	return output, nil
+}
+
+// ── Get vault state (BTC + debt + creator) for the lock-light UI ──
+// Returns 96 bytes: vaultBTC[32] || vaultDebt[32] || creatorPresent[32].
+// Light logic (mobile Bridge tab):
+//   OFF   = vaultBTC == 0
+//   RED   = vaultBTC > 0 && vaultDebt > 0   ("DEBT")
+//   GREEN = vaultBTC > 0 && vaultDebt == 0  ("1WAY")
+func wayGetVault(input []byte, state *StateDB) ([]byte, error) {
+	if len(input) < 36 {
+		return nil, fmt.Errorf("1WAY: getVault input too short")
+	}
+	vaultID := input[4:36]
+	addr := PrecompileAddrHex(0x22)
+	acc := state.GetOrCreateAccount(addr)
+
+	btcKey := storageKey(append([]byte{WaySlotVaultBTC}, vaultID...))
+	btc := readBigInt(acc.Storage[btcKey])
+
+	debtKey := storageKey(append([]byte{WaySlotVault1Way}, vaultID...))
+	debt := readBigInt(acc.Storage[debtKey])
+
+	creatorKey := storageKey(append([]byte{WaySlotVaultCreator}, vaultID...))
+	creatorPresent := uint64(0)
+	if acc.Storage[creatorKey] != [32]byte{} {
+		creatorPresent = 1
+	}
+
+	out := make([]byte, 96)
+	btc.FillBytes(out[0:32])
+	debt.FillBytes(out[32:64])
+	cp := writeUint64(creatorPresent)
+	copy(out[64:96], cp[:])
+	return out, nil
 }
 
 // ── Get BTC/USD price ──

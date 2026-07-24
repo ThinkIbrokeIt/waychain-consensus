@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // GenesisConfig defines the initial state of the WayChain network
@@ -49,9 +52,19 @@ func DefaultGenesis() GenesisConfig {
 			{ID: "genesis-val-5", Stake: 10000},
 		},
 		Accounts: []GenesisAccount{
-			{Address: "treasury", Balance: 10_000_000, Level: 3},  // 10% treasury
-			{Address: "ecosystem", Balance: 13_500_000, Level: 3},  // 13.5% reserve
-			// Remaining 76.5% distributed equally at genesis event
+			// Treasury precompile (0x03) — the paying treasury for quests +
+			// gov-funded community tasks. MUST be the real precompile address,
+			// not the literal string "treasury" (that orphaned 10M under a junk key).
+			{Address: evm.PrecompileAddrHex(0x03), Balance: 10_000_000, Level: 3},
+			// Ecosystem reserve — real fixed reserve address (not a string key).
+					// NOTE: Address WITHOUT 0x prefix (RPC queries strip it; internal storage is raw hex)
+					{Address: "00000000000000000000000000000000000000ec", Balance: 13_500_000, Level: 3},
+					// Founder bootstrap account (2026-07-20, issue #150): seeded with WAY
+					// for gas + DoxDev L3 so the founder can post/verify tasks and act as
+					// the autopilot oracle from day one. Breaks the 0-WAY gas deadlock.
+					// NOTE: Address WITHOUT 0x prefix (RPC queries strip it; internal storage is raw hex)
+					{Address: "e5da0c28804c512ac7e0f4a53ad8d6fd13f81e76", Balance: 1_000_000, Level: 3},
+			// Remaining ~75.5% distributed at the genesis event.
 		},
 	}
 }
@@ -71,11 +84,23 @@ func InitGenesis(config GenesisConfig) *GenesisState {
 
 	// ── Genesis accounts ──
 	// ── Genesis accounts ──
-	for _, acc := range config.Accounts {
-		account := chain.State.GetOrCreateAccount(acc.Address)
-		account.Balance.SetUint64(acc.Balance)
-		account.DoxDevLevel = acc.Level
+	// ── Consolidated one-shot genesis seed (issue #155) ──
+	// Seeds every bootstrap account + precompile reserve in ONE place.
+	// Idempotent (only fills what's empty), so it is also safe to call from
+	// the founder's first faucet drip on a live chain initialized before
+	// this seeding existed. Replaces the previous piecemeal seeding.
+	evm.SeedAllGenesis(chain.State)
+
+	// ── Founder bootstrap (issue #150) ──
+	// Designate the founder as the autopilot oracle (Dox_Dev L3) so objective
+	// quests/tasks auto-verify from day one (no human bottleneck).
+	founder := "e5da0c28804c512ac7e0f4a53ad8d6fd13f81e76"
+	fAcc := chain.State.GetOrCreateAccount(founder)
+	fAcc.DoxDevLevel = 3
+	if err := evm.SetAutopilot(chain.State, founder); err != nil {
+		fmt.Printf("  WARN: SetAutopilot failed: %v\n", err)
 	}
+	fmt.Printf("  Founder %s seeded: 1M WAY, DoxDev L3, autopilot oracle\n", founder)
 
 	// ── Initial supply checks ──
 	var totalGenesis uint64

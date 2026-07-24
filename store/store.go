@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package store
 
 import (
@@ -314,6 +315,7 @@ type TxData struct {
 	Value    []byte // big.Int bytes
 	GasLimit uint64
 	GasPrice uint64
+	GasUsed  uint64 // Actual gas consumed (EXPL-2)
 	Data     []byte
 	Hash     [32]byte
 	Signature []byte

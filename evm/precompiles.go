@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 import (
@@ -147,9 +148,9 @@ var PrecompilesTable = map[byte]*Precompile{
 	},
 	0x21: {
 		Address: 0x21,
-		Name:    "WIFRGantletRewards",
+		Name:    "Keccak256", // app-layer hashing bridge (as originally intended)
 		Gas:     1000,
-		Fn:      wifrGauntletPrecompile,
+		Fn:      keccak256Precompile,
 	},
 	// ── Token precompiles (0x22–0x26) — ported from waychain-client ──
 	0x22: {
@@ -182,47 +183,25 @@ var PrecompilesTable = map[byte]*Precompile{
 		Gas:     5000,
 		Fn:      templateRegistryPrecompile,
 	},
+	0x27: {
+		Address: 0x27,
+		Name:    "GasFaucet", // drips WAY for gas to new accounts / quest trackers
+		Gas:     3000,
+		Fn:      faucetPrecompile,
+	},
 }
 
 // IsPrecompile returns true if the address is a precompile
 func IsPrecompile(addr byte) bool {
-	return addr >= 0x0C && addr <= 0x26
+	return addr >= 0x0C && addr <= 0x27
 }
 
-// ── 0x21: WIFR Gauntlet Rewards ──
-func wifrGauntletPrecompile(input []byte, caller string, state *StateDB, blockNum uint64) ([]byte, error) {
-	if len(input) < 4 {
-		return nil, fmt.Errorf("WIFR: input too short")
-	}
-	sel := selectorBytes(input)
-	rewards := &WIFRGantletRewards{State: state}
-
-	switch sel {
-	case 0xCF705883: // initialize()
-		return []byte{1}, rewards.Initialize()
-	case 0x63760E3D: // getRemainingRewards(uint64)
-		if len(input) < 36 {
-			return nil, fmt.Errorf("WIFR: getRemainingRewards input too short")
-		}
-		poolID := new(big.Int).SetBytes(input[4:36]).Uint64()
-		out := writeUint64(rewards.GetRemainingRewards(poolID))
-		return out[:], nil
-	case 0x8AA238FA: // claimPioneer(address)
-		if len(input) < 24 {
-			return nil, fmt.Errorf("WIFR: claimPioneer input too short")
-		}
-		addr := fmt.Sprintf("%x", input[4:24])
-		if err := rewards.ClaimPioneer(addr); err != nil {
-			return nil, err
-		}
-		return []byte{1}, nil
-	case 0x100678AA: // getTotalRemaining()
-		out := writeUint64(rewards.GetTotalRemaining())
-		return out[:], nil
-	default:
-		return nil, fmt.Errorf("WIFR: unknown selector 0x%08X", sel)
-	}
-}
+// ── 0x21: Keccak256 (app-layer hashing bridge) ──
+// Implemented in keccak_precompile.go (keccak256Precompile).
+// This address was previously assigned to a removed reward pool; its role is
+// now the SHA-3 hashing bridge used by Solidity dApps. The old reward function
+// is subsumed by the wifr-bridge quest (TaskRegistry 0x23, treasury 0x03).
+// See issues #61/#62/#63.
 
 // ExecutePrecompile runs a precompile and returns the result
 func ExecutePrecompile(addr byte, input []byte, caller string, state *StateDB, blockNum uint64) ([]byte, uint64, error) {
@@ -537,10 +516,10 @@ func stateRentCalc(input []byte, caller string, state *StateDB, blockNum uint64)
 
 // PrecompileNames returns a formatted list of all precompiles
 func PrecompileNames() string {
-	// Range must match PrecompilesTable + protocol-manifest.json (0x0C-0x26).
+	// Range must match PrecompilesTable + protocol-manifest.json (0x0C-0x27).
 	// Stale "0x0C-0x20" banners are caught by scripts/audit-consistency.sh (issue #24).
-	result := "\nWayChain Precompiles (0x0C-0x26):\n"
-	for addr := byte(0x0C); addr <= 0x26; addr++ {
+	result := "\nWayChain Precompiles (0x0C-0x27):\n"
+	for addr := byte(0x0C); addr <= 0x27; addr++ {
 		if pc, ok := PrecompilesTable[addr]; ok {
 			result += fmt.Sprintf("  0x%02X — %s (gas: %d)\n", addr, pc.Name, pc.Gas)
 		}
@@ -555,10 +534,20 @@ func PrecompileNames() string {
 // Each precompile stores state in its own StateDB account at address
 // format "0000000000000000000000000000000000000013" for 0x13, etc.
 // Storage keys use sha256 for deterministic slot addressing.
-// ABI function selectors use sha256(signature)[:4] instead of keccak256.
+// ABI function selectors: CORE precompiles dispatch on sha256(sig)[:4]; the
+// Solidity APPLICATION LAYER uses keccak256 (see REPO_LAW.md Article X). The
+// keccak primitive is already in the EVM (deploy.go derives contract addresses
+// with sha3.NewLegacyKeccak256). This comment previously claimed all ABI
+// selectors were sha256 — that was stale after the 2026-07-04 keccak decision.
 
+// PrecompileAddrHex returns the 20-byte (40-hex-char) storage key for a
+// precompile address. MUST be 40 chars so client queries (way_getBalance with a
+// standard 0x-prefixed 40-hex address) resolve. Bug fixed 2026-07-20 (issue
+// #143): prior format emitted 38 chars, so genesis-seeded precompile reserves
+// (e.g. GasFaucet 0x27) were stored under a key that client lookups missed →
+// way_getBalance returned 0x0 despite the reserve being seeded.
 func PrecompileAddrHex(addr byte) string {
-	return fmt.Sprintf("000000000000000000000000000000000000%02x", addr)
+	return fmt.Sprintf("00000000000000000000000000000000000000%02x", addr)
 }
 
 // ── Storage key helpers ──
@@ -618,6 +607,7 @@ const (
 	selDoxUpgradeBadge uint32 = 0x215F898D // upgradeBadge(address,uint8)
 	selDoxAddCurator   uint32 = 0x0F9BD4BD // addCurator(address)
 	selDoxRemoveCurator uint32 = 0xD52CDF2D // removeCurator(address)
+	selDoxApply         uint32 = 0x1A2B3C4D // doxApply(roleHash[32], docsHash[32], payAddr[20]) — 3p/3t application
 )
 
 // BIJO selectors
@@ -925,6 +915,32 @@ func doxDevBadgePrecompile(input []byte, caller string, state *StateDB, blockNum
 		if count > 3 {
 			acc.Storage[countKey] = writeUint64(count - 1)
 		}
+		return []byte{1}, nil
+
+	case selDoxApply:
+		// doxApply(roleHash[32], docsHash[32], payAddr[20]) — 3p/3t application.
+		// Records an application from caller (issue #75). Reviewed off-chain by a
+		// governor (L3 curator), who then issues/upgrades the badge. The
+		// application is stored under 0x13 storage slot 0x40 + caller so it can
+		// be enumerated/reviewed. payAddr receives WAY on task payout.
+		if len(input) < 84 {
+			return nil, fmt.Errorf("input too short")
+		}
+		roleHash := input[4:36]
+		docsHash := input[36:68]
+		payAddr := readAddress(input, 68)
+		appKey := storageKey(append([]byte{0x40}, []byte(caller)...))
+		var rec [32]byte
+		copy(rec[2:22], payAddr[:])
+		acc.Storage[appKey] = rec
+		roleKey := storageKey(append([]byte{0x41}, []byte(caller)...))
+		var rslot [32]byte
+		copy(rslot[:], roleHash)
+		acc.Storage[roleKey] = rslot
+		docsKey := storageKey(append([]byte{0x42}, []byte(caller)...))
+		var dslot [32]byte
+		copy(dslot[:], docsHash)
+		acc.Storage[docsKey] = dslot
 		return []byte{1}, nil
 
 	default:
@@ -1358,6 +1374,9 @@ func storageEndowmentPrecompile(input []byte, caller string, state *StateDB, blo
 			state.AddLog(addr, [][32]byte{
 				storageKey([]byte("OperatorRegistered")),
 			}, []byte(caller), blockNum)
+
+			// ── Economic Health: data-storage economy — capital committed ──
+			EconoAccrueStorage(stakeAmount.Uint64(), blockNum)
 
 			return []byte{1}, nil
 

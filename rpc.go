@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package main
 
 import (
@@ -42,12 +43,20 @@ type RPCError struct {
 // RPCServer handles JSON-RPC requests for WayChain
 type RPCServer struct {
 	chain       *Chain
+	validators  *ValidatorSet // optional; enables way_validatorCount
 	mu          sync.RWMutex
 	port        int
 	server      *http.Server
 	subs        *SubscriptionManager
 	rateLimiter *RateLimiter
 	p2pNode     *P2PNode
+}
+
+// SetValidators wires the active validator set so the RPC can report
+// way_validatorCount. Called from the node entrypoint after the consensus
+// engine is constructed.
+func (rpc *RPCServer) SetValidators(vs *ValidatorSet) {
+	rpc.validators = vs
 }
 
 // NewRPCServer creates a new RPC server connected to the chain
@@ -105,10 +114,12 @@ func (rpc *RPCServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "https://waychain.org")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-	w.Header().Set("Access-Control-Max-Age", "86400")
+	// NOTE: CORS is owned exclusively by nginx (sites-available/waychain), which
+	// adds Access-Control-Allow-Origin "*" with `always`. The Go API MUST NOT set
+	// ACAO — a duplicate ACAO header (different values) is invalid per spec and
+	// makes browsers reject the response ("Failed to fetch"), while curl ignores
+	// it. That duplication is what broke Mission Control / all browser RPC calls.
+	// OPTIONS preflight is still short-circuited here; nginx passes it through.
 
 	if r.Method == "OPTIONS" {
 		return
@@ -256,6 +267,28 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 		}
 		return fmt.Sprintf("0x%x", acc.Nonce), nil
 
+	// ── Debug: introspect live in-memory state (issue #143 diagnostics) ──
+	// Lists every account key + balance currently held by the RPC server's
+	// chain.State. Used to verify genesis seeding is actually live (truth-first:
+	// see the running node's state, not reconstruct it).
+	case "way_debugAccountCount":
+		return fmt.Sprintf("%d", len(rpc.chain.State.Accounts)), nil
+
+	case "way_debugAccounts":
+		type acctView struct {
+			Address string `json:"address"`
+			Balance string `json:"balance"`
+		}
+		views := make([]acctView, 0, len(rpc.chain.State.Accounts))
+		for addr, acc := range rpc.chain.State.Accounts {
+			bal := "nil"
+			if acc.Balance != nil {
+				bal = "0x" + acc.Balance.Text(16)
+			}
+			views = append(views, acctView{Address: addr, Balance: bal})
+		}
+		return views, nil
+
 	// ── Call / Estimate ──
 	case "eth_call":
 		var p []map[string]interface{}
@@ -357,6 +390,43 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 		rpc.mu.RUnlock()
 		return strconv.Itoa(count), nil
 
+	// ── Network stats read surfaces (EXPL-3 #19) ──
+	case "way_validatorCount":
+		if rpc.validators != nil {
+			return strconv.Itoa(rpc.validators.Count()), nil
+		}
+		return "0", nil
+
+	case "way_accountCount":
+		rpc.mu.RLock()
+		defer rpc.mu.RUnlock()
+		n := 0
+		for _, acc := range rpc.chain.State.Accounts {
+			if acc == nil {
+				continue
+			}
+			// count accounts with any balance or deployed code
+			if (acc.Balance != nil && acc.Balance.Sign() > 0) || len(acc.Code) > 0 {
+				n++
+			}
+		}
+		return strconv.Itoa(n), nil
+
+	case "way_totalTxCount":
+		rpc.mu.RLock()
+		total := 0
+		for _, b := range rpc.chain.Blocks {
+			total += len(b.Transactions)
+		}
+		rpc.mu.RUnlock()
+		return strconv.Itoa(total), nil
+
+	case "way_pendingTxCount":
+		rpc.mu.RLock()
+		pending := rpc.chain.Pool.Len()
+		rpc.mu.RUnlock()
+		return strconv.Itoa(pending), nil
+
 	// ── Wallet P3 panel read surfaces ──
 	// These expose existing precompile READ functions without going through
 	// eth_call (which the public RPC blocks for precompiles). Read-only.
@@ -375,6 +445,83 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 		return map[string]interface{}{
 			"committed": fmt.Sprintf("0x%x", committed),
 			"withdrawn": fmt.Sprintf("0x%x", withdrawn),
+		}, nil
+
+	// ── Quest / TaskRegistry read surfaces (0x23) ──
+	// Expose live quest state without going through eth_call (which the
+	// public RPC blocks for precompiles). Read-only.
+	case "way_taskStatus":
+		var p []string
+		if err := json.Unmarshal(params, &p); err != nil || len(p) < 2 {
+			return nil, fmt.Errorf("invalid params: expected [\"taskId_hex\", \"claimant_hex\"]")
+		}
+		taskId := strings.ToLower(strings.TrimPrefix(p[0], "0x"))
+		claimant := strings.ToLower(strings.TrimPrefix(p[1], "0x"))
+		idBytes, err := hex.DecodeString(taskId)
+		if err != nil {
+			return "none", nil
+		}
+		return evm.TaskStatusOf(rpc.chain.State, idBytes, claimant), nil
+
+	case "way_questPoolRemaining":
+		rem := evm.QuestPoolRemaining(rpc.chain.State)
+		return "0x" + rem.Text(16), nil
+
+	case "way_questGetAutopilot":
+		ap := evm.QuestGetAutopilot(rpc.chain.State)
+		if ap == "" {
+			return "", nil
+		}
+		return ap, nil
+
+	case "way_wayTotalSupply":
+		return "0x" + evm.QuestTotalSupply(rpc.chain.State).Text(16), nil
+
+	case "way_1wayTotalSupply":
+		// Live 1WAY stablecoin supply: sums each vault's BTC-locked 1WAY
+		// balance, so it flexes with the Bitcoin committed to vaults (NOT a
+		// fixed constant). Distinct from way_wayTotalSupply, which returns
+		// WAY's total supply (WAY is the native gas token).
+		return "0x" + evm.Get1WayTotalSupply(rpc.chain.State).Text(16), nil
+
+	case "way_questCap":
+		return "0x" + evm.QuestCap(rpc.chain.State).Text(16), nil
+
+	// ── Economic Health indicators (on-chain macroeconomics) ──
+	// The chain computes the four decentralized indicators + phase from real
+	// TaskRegistry (0x23) payout events. This is the read surface the
+	// EconoAnalytics oracle + dashboard consume. Truth lives here (Go core),
+	// not in the app-layer Solidity mirror.
+	case "way_econoIndicators":
+		return evm.GetEconoIndicators(rpc.chain.State, rpc.chain.Height), nil
+
+	case "way_econoPolicy":
+		p := evm.GetEconoPolicy()
+		return map[string]interface{}{
+			"phase":     p.Phase,
+			"phaseLabel": func() string {
+				if p.Phase == 1 {
+					return "Expansion"
+				}
+				return "Consolidation"
+			}(),
+			"burnBps":  p.BurnBps,
+			"grantBps": p.GrantBps,
+		}, nil
+
+	// ── SWAY emission projection (READ-ONLY telemetry) ──
+	// Founder 2026-07-18: "we will need to see the numbers before that gets
+	// hard coded." This shows what 3%-of-GBP emission would produce, with NO
+	// mint authority. Does not change supply.
+	case "way_swayEmissionProjection":
+		gbp := evm.EconoGBPEquiv()
+		proj3 := evm.SwayProjectedEmissionFromGBP(300) // 3% of yearly earnings
+		return map[string]interface{}{
+			"gdpEquivalentThisEpoch": gbp,
+			"proposedPctBps":        300,
+			"projectedSwayPerYear":  proj3.String(),
+			"hardCeiling":           evm.SwayHardCeiling,
+			"note":                  "READ-ONLY projection. 3% is a proposed figure, not yet hardcoded or minted.",
 		}, nil
 
 	// ── Contract Deployment ──
@@ -551,7 +698,58 @@ func (rpc *RPCServer) handleMethod(method string, params json.RawMessage) (inter
 		return nil, nil
 
 	case "eth_getLogs":
-		return []interface{}{}, nil
+		// EXPL-2: return real logs. The node stores per-block logs in
+		// BlockWithTx.Logs (precompile + time-task + contract events that the
+		// FFI surfaces). Filter by fromBlock/toBlock, address, and topics.
+		var filter struct {
+			FromBlock string   `json:"fromBlock"`
+			ToBlock   string   `json:"toBlock"`
+			Address   []string `json:"address"`
+			Topics    [][]string `json:"topics"`
+		}
+		// Params is the JSON-RPC array; the first element is the filter object.
+		if len(params) > 0 {
+			var arr []json.RawMessage
+			if err := json.Unmarshal(params, &arr); err == nil && len(arr) > 0 {
+				_ = json.Unmarshal(arr[0], &filter)
+			}
+		}
+		out := []interface{}{}
+		blocks := rpc.chain.Blocks
+		for bIdx, block := range blocks {
+			// block range filter (hex or "latest")
+			if filter.FromBlock != "" && filter.FromBlock != "latest" {
+				if bn, ok := parseHexBlock(filter.FromBlock); ok && uint64(bIdx) < bn {
+					continue
+				}
+			}
+			if filter.ToBlock != "" && filter.ToBlock != "latest" {
+				if bn, ok := parseHexBlock(filter.ToBlock); ok && uint64(bIdx) > bn {
+					continue
+				}
+			}
+			for _, tx := range block.Transactions {
+				txHash := "0x" + hex.EncodeToString(tx.Hash[:])
+				for li, log := range tx.Logs {
+					if !logMatchesFilter(log, filter.Address, filter.Topics) {
+						continue
+					}
+					out = append(out, LogToRPC(log, uint64(bIdx), txHash, li))
+				}
+			}
+			// also surface block-level logs (time-tasks) without a tx
+			for li, log := range block.Logs {
+				// skip ones already attributed to a tx
+				if logAttributed(block, log) {
+					continue
+				}
+				if !logMatchesFilter(log, filter.Address, filter.Topics) {
+					continue
+				}
+				out = append(out, LogToRPC(log, uint64(bIdx), "", li))
+			}
+		}
+		return out, nil
 
 	case "eth_getBlockTransactionCountByNumber":
 		var p []interface{}
@@ -607,10 +805,13 @@ func createAddress(deployer string, nonce uint64) [20]byte {
 	return addr
 }
 
-// buildReceipt creates a standardized tx receipt map
+// buildReceipt creates a standardized tx receipt map.
+// EXPL-2: reports the real gasUsed (captured in ProduceBlock) and the tx's
+// actual logs — no hardcoded values.
 func buildReceipt(tx Transaction, blockIdx int, blockHash [32]byte) map[string]interface{} {
 	txHex := hex.EncodeToString(tx.Hash[:])
 	bh := fmt.Sprintf("%x", blockHash)
+	logs := txLogsToRPC(tx.Logs, uint64(blockIdx), "0x"+txHex)
 	to := tx.To
 	if to == "" {
 		deployAddr := fmt.Sprintf("%x", createAddress(tx.From, tx.Nonce))
@@ -622,9 +823,9 @@ func buildReceipt(tx Transaction, blockIdx int, blockHash [32]byte) map[string]i
 			"to":                nil,
 			"contractAddress":   "0x" + deployAddr,
 			"status":            "0x1",
-			"gasUsed":           "0x5208",
-			"cumulativeGasUsed": "0x5208",
-			"logs":              []interface{}{},
+			"gasUsed":           fmt.Sprintf("0x%x", tx.GasUsed),
+			"cumulativeGasUsed": fmt.Sprintf("0x%x", tx.GasUsed),
+			"logs":              logs,
 		}
 	}
 	return map[string]interface{}{
@@ -634,10 +835,19 @@ func buildReceipt(tx Transaction, blockIdx int, blockHash [32]byte) map[string]i
 		"from":              "0x" + tx.From,
 		"to":                "0x" + to,
 		"status":            "0x1",
-		"gasUsed":           "0x5208",
-		"cumulativeGasUsed": "0x5208",
-		"logs":              []interface{}{},
+		"gasUsed":           fmt.Sprintf("0x%x", tx.GasUsed),
+		"cumulativeGasUsed": fmt.Sprintf("0x%x", tx.GasUsed),
+		"logs":              logs,
 	}
+}
+
+// txLogsToRPC converts a tx's EVM logs to the Ethereum-compatible receipt shape.
+func txLogsToRPC(logs []*evm.LogEntry, blockNum uint64, txHash string) []interface{} {
+	out := make([]interface{}, 0, len(logs))
+	for i, l := range logs {
+		out = append(out, LogToRPC(l, blockNum, txHash, i))
+	}
+	return out
 }
 
 // min returns the smaller of a and b
@@ -646,6 +856,77 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// parseHexBlock parses a hex ("0x..") or decimal block number string.
+func parseHexBlock(s string) (uint64, bool) {
+	s = strings.TrimPrefix(s, "0x")
+	if s == "" {
+		return 0, false
+	}
+	var n uint64
+	if _, err := fmt.Sscanf(s, "%x", &n); err == nil {
+		return n, true
+	}
+	if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+		return n, true
+	}
+	return 0, false
+}
+
+// logMatchesFilter checks an EVM log against an eth_getLogs filter.
+// Address filter: log.Address must match one of the requested addresses.
+// Topics filter: positional prefix match (Ethereum semantics) — topic[i] of
+// the log must be in the requested set for position i; nil/empty = any.
+//
+// Both sides are compared WITHOUT a "0x" prefix (raw hex), so the filter
+// accepts addresses/topics with or without the prefix.
+func logMatchesFilter(log *evm.LogEntry, addrs []string, topics [][]string) bool {
+	if len(addrs) > 0 {
+		match := false
+		for _, a := range addrs {
+			if strings.EqualFold(log.Address, strings.TrimPrefix(a, "0x")) {
+				match = true
+				break
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+	for i, set := range topics {
+		if len(set) == 0 {
+			continue // wildcard at this position
+		}
+		if i >= len(log.Topics) {
+			return false
+		}
+		want := hex.EncodeToString(log.Topics[i][:])
+		hit := false
+		for _, t := range set {
+			if strings.EqualFold(want, strings.TrimPrefix(t, "0x")) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return false
+		}
+	}
+	return true
+}
+
+// logAttributed reports whether a block-level log is already covered by a
+// transaction's own log list (so we don't emit it twice in eth_getLogs).
+func logAttributed(block *BlockWithTx, log *evm.LogEntry) bool {
+	for _, tx := range block.Transactions {
+		for _, l := range tx.Logs {
+			if l == log {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ── WebSocket Handler ──

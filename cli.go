@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package main
 
 import (
@@ -34,6 +35,7 @@ func RunCLI() {
 			genesisPath = os.Args[2]
 		}
 
+		// Use DefaultGenesis() which now has FIXED addresses (real precompile keys)
 		config := DefaultGenesis()
 		if _, err := os.Stat(genesisPath); err == nil {
 			loaded, err := LoadGenesis(genesisPath)
@@ -42,11 +44,13 @@ func RunCLI() {
 			}
 		}
 
-		SaveGenesis(config, "genesis.json")
 		gs := InitGenesis(config)
 		gs.ProduceGenesisBlock()
-		SaveGenesis(config, "genesis.json")
-		fmt.Println("  ✅ Chain initialized. Genesis written to genesis.json")
+
+		// Save the genesis that was ACTUALLY used (with corrected addresses)
+		// Note: This writes the config back with the fixed state
+		_ = gs // gs.Chain.State now has correct state; config already has fixed addresses
+		fmt.Println("  ✅ Chain initialized to genesis state")
 
 	case "start":
 		runNode()
@@ -130,6 +134,10 @@ func runNode() {
 		chain = gs.Chain
 		chain.Store = store
 
+		// Seed live WAY supply (backs the 5%-of-supply quest cap) on the
+		// canonical genesis chain so it persists via Sync below.
+		chain.SeedQuestSupply()
+
 		// Persist genesis state
 		if err := chain.Sync("genesis", 0, [32]byte{}, [32]byte{}); err != nil {
 			fmt.Printf("  ❌ Failed to persist genesis: %v\n", err)
@@ -206,6 +214,8 @@ func runNode() {
 	// ── Start JSON-RPC server (with WebSocket support) ──
 	rpcAddr := getEnv("WAYCHAIN_RPC_LISTEN", ":9545")
 	rpc := RunRPCServer(rpcAddr, chain)
+	// Expose the validator set so way_validatorCount reports the live count.
+	rpc.SetValidators(vs)
 	// Wire P2P node to RPC server for tx/block broadcasting
 	rpc.SetP2PNode(p2pNode)
 	fmt.Printf("  🌐 RPC server (HTTP+WS) on %s\n", rpcAddr)

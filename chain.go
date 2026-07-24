@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package main
 
 import (
@@ -20,11 +21,13 @@ type Transaction struct {
 	Value    *big.Int
 	GasLimit uint64
 	GasPrice uint64
+	GasUsed  uint64   // Actual gas consumed during execution (set in ProduceBlock)
 	Data     []byte   // Calldata or init code
 	Hash     [32]byte
 	Signature []byte  // Ed25519 signature
 	Lane     evm.LaneType // Execution lane (0=consensus, 1=oracle, 2=private)
 	EncryptedData []byte // Encrypted payload for PrivateLane/OracleLane
+	Logs     []*evm.LogEntry // EVM logs emitted by this tx's execution (set in ProduceBlock)
 }
 
 // NewTransaction creates a new transaction
@@ -133,6 +136,7 @@ type BlockWithTx struct {
 	Transactions []Transaction
 	StateRoot   [32]byte  // Hash of EVM state after executing txs
 	Hash        [32]byte
+	Logs        []*evm.LogEntry // All EVM logs emitted in this block (precompile + time-task + contract)
 }
 
 func (b *BlockWithTx) ComputeHash() [32]byte {
@@ -240,14 +244,24 @@ func (c *Chain) InitPrecompiles() {
 	new(big.Int).SetUint64(startTime).FillBytes(st[:])
 	endowAcc.Storage[[32]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}] = st
 
-	// ── WIFR Gauntlet (0x21): create account and initialize pools ──
-	wifrAddr := evm.PrecompileAddrHex(0x21)
-	wifrAcc := c.State.GetOrCreateAccount(wifrAddr)
-	_ = wifrAcc
-	if err := (&evm.WIFRGantletRewards{State: c.State}).Initialize(); err != nil {
-		panic(err)
-	}
+	// ── 0x21 Keccak256 precompile account (app-layer hashing bridge) ──
+	// No genesis state required; account is created so the precompile address
+	// exists. Reward-pool init removed (WIFRGantletRewards retired — see #61/#62/#63).
+	_ = c.State.GetOrCreateAccount(evm.PrecompileAddrHex(0x21))
+
+	// ── SWAY (0x24): seed the ecosystem incentive token ──
+	// Initial 1B supply + allocation buckets (45/20/15/12/8). Idempotent;
+	// runs once at genesis. See DECISIONS.md 2026-07-18.
+	evm.SwayInit(c.State)
 }
+
+// SeedQuestSupply seeds the live WAY total-supply tracker (slot 0x41 of 0x23)
+	// to the declared starting supply. Called during genesis init (cli.go runNode)
+	// so the 5%-of-supply quest cap has a non-zero base. chain.go increments this
+	// as validator block rewards mint, so the cap scales with inflation.
+	func (c *Chain) SeedQuestSupply() {
+		evm.QuestAddSupply(c.State, new(big.Int).SetUint64(evm.WAYStartingSupply))
+	}
 
 func (c *Chain) issueGenesisBadge(badgeAcc *evm.Account, developer string, level uint8, validityPeriod uint64) {
 	// Pad developer string to 20 bytes to match precompile address encoding
@@ -305,9 +319,8 @@ func (c *Chain) OpenStore(dbPath string) (*store.Store, error) {
 		c.Height = s.Height()
 		// Rebuild EVM with loaded state
 		c.EVM = evm.NewEVM(state, evm.ConsensusLane, c.Height+1, uint64(time.Now().Unix()), 10008, 30_000_000, "")
-		if err := (&evm.WIFRGantletRewards{State: c.State}).EnsureInitialized(); err != nil {
-			return nil, fmt.Errorf("chain: init wifr: %w", err)
-		}
+		// 0x21 Keccak256 precompile: no lazy init needed (stateless).
+		// (Formerly WIFRGantletRewards.EnsureInitialized — retired, see #61/#62/#63.)
 
 		// Log latest blocks
 		blocks, _ := s.LatestBlocks(5)
@@ -361,6 +374,7 @@ func (c *Chain) SyncTxs(block *BlockWithTx) error {
 			Value:     tx.Value.Bytes(),
 			GasLimit:  tx.GasLimit,
 			GasPrice:  tx.GasPrice,
+			GasUsed:   tx.GasUsed,
 			Data:      tx.Data,
 			Hash:      tx.Hash,
 			Signature: tx.Signature,
@@ -398,6 +412,7 @@ func (c *Chain) LoadTxFromStore(hash [32]byte) (*Transaction, uint64, error) {
 		Value:     new(big.Int).SetBytes(txd.Value),
 		GasLimit:  txd.GasLimit,
 		GasPrice:  txd.GasPrice,
+		GasUsed:   txd.GasUsed,
 		Data:      txd.Data,
 		Hash:      txd.Hash,
 		Signature: txd.Signature,
@@ -478,7 +493,7 @@ func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 		// Execute via EVM with transaction's lane
 		// Create EVM instance with correct lane for this transaction
 		txEVM := evm.NewEVM(c.State, tx.Lane, c.Height, uint64(time.Now().Unix()), 10008, tx.GasLimit, "")
-		
+
 		ctx := &evm.CallContext{
 			Caller:   tx.From,
 			Address:  tx.To,
@@ -486,7 +501,11 @@ func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 			GasLimit: tx.GasLimit,
 			Calldata: tx.Data,
 		}
+		// Capture only the logs emitted by THIS tx's execution. Precompiles
+		// append to the shared State.Logs slice, so snapshot length before/after.
+		logsBefore := len(c.State.Logs)
 		result := txEVM.Execute(ctx)
+		txLogs := c.State.Logs[logsBefore:]
 
 		// Deduct actual gas cost (not full gas limit)
 		cost := new(big.Int).SetUint64(result.GasUsed * gasPrice)
@@ -499,24 +518,13 @@ func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 		}
 
 		// Tx executed successfully — include in block
+		tx.GasUsed = result.GasUsed
+		tx.Logs = txLogs
 		executed = append(executed, *tx)
 	}
 
-	// Compute state root (simplified: hash of all account data)
-	stateHash := sha256.Sum256([]byte(fmt.Sprintf("%v", c.State.Accounts)))
-
-	block := &BlockWithTx{
-		Height:       c.Height,
-		Proposer:     proposer,
-		Timestamp:    time.Now().Unix(),
-		PrevHash:     prevHash,
-		Transactions: executed,
-		StateRoot:    stateHash,
-	}
-	block.Hash = block.ComputeHash()
-	c.Blocks = append(c.Blocks, block)
-
-	// Execute due time-scheduled tasks
+	// Execute due time-scheduled tasks BEFORE assembling the block so their
+	// logs are captured into block.Logs alongside tx logs.
 	te := evm.NewTimeExecution(c.State)
 	dueTasks, _ := te.ExecuteDueTasks(c.Height)
 	if len(dueTasks) > 0 {
@@ -533,19 +541,60 @@ func (c *Chain) ProduceBlock(proposer ValidatorID) *BlockWithTx {
 		}
 	}
 
+	// Compute state root (simplified: hash of all account data)
+	stateHash := sha256.Sum256([]byte(fmt.Sprintf("%v", c.State.Accounts)))
+
+	// All logs emitted during this block's execution (tx logs + time-tasks).
+	blockLogs := make([]*evm.LogEntry, len(c.State.Logs))
+	copy(blockLogs, c.State.Logs)
+
+	block := &BlockWithTx{
+		Height:       c.Height,
+		Proposer:     proposer,
+		Timestamp:    time.Now().Unix(),
+		PrevHash:     prevHash,
+		Transactions: executed,
+		StateRoot:    stateHash,
+		Logs:         blockLogs,
+	}
+	block.Hash = block.ComputeHash()
+	c.Blocks = append(c.Blocks, block)
+
 	// Rollover the per-epoch emission cap when a new epoch begins.
 	if c.Staking != nil && c.Staking.EpochLength > 0 && c.Height%c.Staking.EpochLength == 0 {
 		c.Staking.RolloverEpoch()
+		// ── Economic Health: freeze the window, compute phase, run the
+		// automated feedback loop (expansion burn / consolidation stimulus).
+		// Truth-first: computed by the chain from real payout events, hard-
+		// capped so the token cannot be destabilized by the loop.
+		evm.AccrueEcono(c.State, c.Height)
+		evm.ApplyEconoPolicy(c.State)
 	}
 
 	// Distribute staking rewards for this block (anchored to the 7% annual cap).
 	if c.Staking != nil {
 		rewards := c.Staking.DistributeBlockReward(c.Height)
+		var minted uint64
 		for id, amount := range rewards {
 			if amount > 0 {
 				acc := c.State.GetOrCreateAccount(id.String())
 				acc.Balance.Add(acc.Balance, new(big.Int).SetUint64(amount))
+				minted += amount
 			}
+		}
+		// #71: route a share of the emission to the quest treasury (0x03) so the
+		// quest budget auto-replenishes (funds for new users). The 5%-of-live-
+		// supply quest CAP (QuestCap) already scales with inflation.
+		if minted > 0 {
+			treasuryShare := TreasuryShareOf(minted)
+			if treasuryShare > 0 {
+				treasury := c.State.GetOrCreateAccount(evm.PrecompileAddrHex(0x03))
+				if treasury.Balance == nil {
+					treasury.Balance = new(big.Int)
+				}
+				treasury.Balance.Add(treasury.Balance, new(big.Int).SetUint64(treasuryShare))
+			}
+			evm.QuestAddSupply(c.State, new(big.Int).SetUint64(minted))
 		}
 	}
 

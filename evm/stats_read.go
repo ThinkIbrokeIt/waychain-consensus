@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 import (
@@ -41,6 +42,23 @@ func GetBridgeStats(s *StateDB) (committed, withdrawn *big.Int) {
 	return
 }
 
+// Get1WayTotalSupply reads the live 1WAY stablecoin supply from the 0x22
+// precompile. It sums each vault's locked 1WAY balance (WaySlotVault1Way
+// storage slots), so the supply flexes with the BTC committed to vaults —
+// NOT a fixed constant. Mirrors wayGetTotalSupply exactly.
+func Get1WayTotalSupply(s *StateDB) *big.Int {
+	acc := s.GetOrCreateAccount(PrecompileAddrHex(0x22))
+	total := big.NewInt(0)
+	for key, val := range acc.Storage {
+		if len(key) == 32 && key[0] == WaySlotVault1Way {
+			total.Add(total, readBigInt(val))
+		}
+	}
+	if total == nil {
+		total = big.NewInt(0)
+	}
+	return total
+}
 // GovernanceListProposals enumerates on-chain proposals via the proposal_index
 // maintained by govCreateProposal. Returns an empty slice when no proposals
 // exist yet (pre-index proposals are not retro-enumerated — honest).
