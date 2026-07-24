@@ -10,9 +10,11 @@ WayChain is a Layer 1 blockchain built in Go with a custom EVM execution layer. 
 - **P2P**: libp2p-based gossip for block/tx propagation
 
 ## Source of Truth (issue #23)
+
+> **This repository is a READ-ONLY MIRROR of the [WayChain monorepo](https://github.com/ThinkIbrokeIt/waychain).** The monorepo `consensus/` is canonical. Edit there; this mirror syncs automatically via `mirror-satellites.yml`.
 | Layer | Canonical | Not SoT |
 |---|---|---|
-| Protocol code | **this repo `master`** + `protocol-manifest.json` | monorepo `waychain/consensus`, chat, stale audits |
+| Protocol code | **monorepo `ThinkIbrokeIt/waychain` `consensus/`** + `protocol-manifest.json` | this mirror, chat, stale audits |
 | Live deploy | **AWS 3.89.116.45** `/usr/local/bin/waychain` sha256 | "merged on GitHub" alone |
 | Site | `ThinkIbrokeIt/waychain-site` `main` | master lag / monorepo site copy |
 | Mobile | `ThinkIbrokeIt/waychain-mobile` `main` | unsigned ad-hoc builds |
