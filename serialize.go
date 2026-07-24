@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package main
 
 import (
@@ -211,6 +212,7 @@ type TxJSON struct {
 	Value       string `json:"value"`
 	GasLimit    string `json:"gasLimit"`
 	GasPrice    string `json:"gasPrice"`
+	GasUsed     string `json:"gasUsed"` // Actual gas consumed (EXPL-2)
 	Data        string `json:"data"`
 	Hash        string `json:"hash"`
 	Signature   string `json:"signature"`
@@ -227,10 +229,30 @@ func (tx *Transaction) ToJSON() TxJSON {
 		Value:       "0x" + tx.Value.Text(16),
 		GasLimit:    fmt.Sprintf("0x%x", tx.GasLimit),
 		GasPrice:    fmt.Sprintf("0x%x", tx.GasPrice),
+		GasUsed:     fmt.Sprintf("0x%x", tx.GasUsed),
 		Data:        "0x" + hex.EncodeToString(tx.Data),
 		Hash:        "0x" + hex.EncodeToString(tx.Hash[:]),
 		Signature:   "0x" + hex.EncodeToString(tx.Signature),
 		Lane:        fmt.Sprintf("0x%d", tx.Lane),
 		EncryptedData: hex.EncodeToString(tx.EncryptedData),
+	}
+}
+
+// LogToRPC converts an EVM LogEntry to the Ethereum-compatible eth_getLogs shape.
+func LogToRPC(log *evm.LogEntry, blockNum uint64, txHash string, logIndex int) map[string]interface{} {
+	topics := make([]string, 0, len(log.Topics))
+	for _, t := range log.Topics {
+		topics = append(topics, "0x"+hex.EncodeToString(t[:]))
+	}
+	return map[string]interface{}{
+		"address":          "0x" + log.Address,
+		"topics":           topics,
+		"data":             "0x" + hex.EncodeToString(log.Data),
+		"blockNumber":      fmt.Sprintf("0x%x", blockNum),
+		"transactionHash":  txHash,
+		"transactionIndex": "0x0",
+		"logIndex":         fmt.Sprintf("0x%x", logIndex),
+		"blockHash":        "",
+		"removed":          false,
 	}
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 import (
@@ -22,6 +23,7 @@ const (
 	VoteTypeDirect    uint8 = 0
 	VoteTypeQuadratic uint8 = 1
 	VoteTypeFutarchy  uint8 = 2
+	VoteTypeInflation uint8 = 3 // proposal to adjust annual inflation (3%–9%)
 )
 
 const (
@@ -334,6 +336,20 @@ func govFinalize(input []byte, caller string, state *StateDB, blockNum uint64) (
 
 	if passed {
 		propSlot[1] = ProposalStatusPassed
+		// Execute: a passed inflation-adjustment proposal mutates the protocol
+		// emission rate (bounded 3%–9%). Calldata slot holds uint32(pct*100).
+		if propSlot[0] == VoteTypeInflation {
+			calldataSlot := acc.Storage[govCalldataKey(proposalID)]
+			encoded := uint32(calldataSlot[0])<<24 | uint32(calldataSlot[1])<<16 |
+				uint32(calldataSlot[2])<<8 | uint32(calldataSlot[3])
+			if pct, err := CalldataToInflationPct(encoded); err == nil {
+				applied := SetInflationPct(pct)
+				state.AddLog(addr, [][32]byte{
+					storageKey([]byte("InflationSet")),
+					*(*[32]byte)(proposalID),
+				}, uint32ToBytes(uint32(applied * 100)), blockNum)
+			}
+		}
 	} else {
 		propSlot[1] = ProposalStatusFailed
 	}

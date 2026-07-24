@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 import (
@@ -157,13 +158,14 @@ func srAddLiquidity(input []byte, caller string, state *StateDB, blockNum uint64
 
 	state.GetOrCreateAccount(swapAddr).Storage[key] = writeBigInt(newTotal)
 
-	// Mint SWAY rewards to LP provider
+	// Mint SWAY rewards to LP provider (via supply-controlled mint; capped
+	// + drawn from the dexLP allocation bucket). Farm-and-dump is mitigated by
+	// the TrustlessLock created below (30-day minimum lockup).
 	reward := big.NewInt(100) // Base SWAY reward per liquidity add
-	callerAcc := state.GetOrCreateAccount(caller)
-	swayBalanceKey := storageKey([]byte("sway:balance:" + caller))
-	current := readBigInt(callerAcc.Storage[swayBalanceKey])
-	newBalance := new(big.Int).Add(current, reward)
-	callerAcc.Storage[swayBalanceKey] = writeBigInt(newBalance)
+	if err := swayMintInternal(state, caller, reward, "dexLP"); err != nil {
+		// Bucket exhausted → no reward, but liquidity add still succeeds.
+		_ = err
+	}
 
 	// Create TrustlessLock for LP withdrawal protection (minimum 30 days)
 	// TrustlessLock createTimeLock expects: pool(20) + token0(20) + token1(20) + amount(32) + period(32) + recipient(20)
@@ -249,13 +251,11 @@ func srSwap(input []byte, caller string, state *StateDB, blockNum uint64) ([]byt
 		return nil, fmt.Errorf("SwapRoute: insufficient output amount")
 	}
 
-	// Mint SWAY rewards to LPs (0.3% of swap volume)
+	// Mint SWAY rewards to LPs (0.3% of swap volume) — supply-controlled.
 	feeAmount := new(big.Int).Div(new(big.Int).Mul(amountIn, big.NewInt(3)), big.NewInt(1000))
-	callerAcc := state.GetOrCreateAccount(caller)
-	swayBalanceKey := storageKey([]byte("sway:balance:" + caller))
-	current := readBigInt(callerAcc.Storage[swayBalanceKey])
-	newBalance := new(big.Int).Add(current, feeAmount)
-	callerAcc.Storage[swayBalanceKey] = writeBigInt(newBalance)
+	if err := swayMintInternal(state, caller, feeAmount, "dexLP"); err != nil {
+		_ = err // bucket exhausted → no reward, swap still succeeds
+	}
 
 	out := writeBigInt(amountOut)
 	return out[:], nil
