@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 import (
@@ -126,6 +127,9 @@ func rentPay(input []byte, caller string, state *StateDB, blockNum uint64) ([]by
 		storageKey([]byte("RentPaid")),
 		commitHash,
 	}, amount.Bytes(), blockNum)
+
+	// ── Economic Health: state rent is recurring economic output ──
+	EconoAccrueRent(amount.Uint64(), blockNum)
 
 	return boolResult(true), nil
 }

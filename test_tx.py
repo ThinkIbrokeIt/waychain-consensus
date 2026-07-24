@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Submit a real signed transaction to WayChain via RPC."""
 import struct
 import hashlib

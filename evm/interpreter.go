@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 import (
@@ -72,16 +73,30 @@ func NewEVM(state *StateDB, lane LaneType, blockNum, timestamp, chainID, gasLimi
 
 // Execute runs a contract call through the production EVM (revm).
 func (evm *EVM) Execute(ctx *CallContext) *ExecutionResult {
-	// Precompile routing (0x0C-0x21)
+	// Precompile routing (0x0C-0x26)
 	if ctx.Address != "" {
 		addrStr := strings.TrimPrefix(strings.ToLower(ctx.Address), "0x")
-		if len(addrStr) == 40 || len(addrStr) == 2 {
-			if b, err := hex.DecodeString(addrStr[len(addrStr)-2:]); err == nil && len(b) == 1 && IsPrecompile(b[0]) {
-				result, _, err := ExecutePrecompile(b[0], ctx.Calldata, ctx.Caller, evm.State, evm.BlockNum)
+		// Precompiles are stored at the canonical zero-padded form
+		// "0000...0013" (PrecompileAddrHex -> 38 chars: 18 zero bytes + 1 byte).
+		// Decode the full address; it is a precompile iff every byte except
+		// the last is zero AND the last byte is a registered precompile.
+		// This matches 42-char (40 zeros+byte), 40-char, 2-char, and bare
+		// 1-byte forms without false-positives on normal accounts.
+		if decoded, err := hex.DecodeString(addrStr); err == nil && len(decoded) >= 1 {
+			last := decoded[len(decoded)-1]
+			isPrecompileForm := true
+			for _, x := range decoded[:len(decoded)-1] {
+				if x != 0 {
+					isPrecompileForm = false
+					break
+				}
+			}
+			if isPrecompileForm && IsPrecompile(last) {
+				result, _, err := ExecutePrecompile(last, ctx.Calldata, ctx.Caller, evm.State, evm.BlockNum)
 				if err != nil {
 					return &ExecutionResult{Error: err}
 				}
-				return &ExecutionResult{ReturnData: result, GasUsed: PrecompileGas(b[0])}
+				return &ExecutionResult{ReturnData: result, GasUsed: PrecompileGas(last)}
 			}
 		}
 	}

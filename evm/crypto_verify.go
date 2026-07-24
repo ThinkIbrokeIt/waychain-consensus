@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 // crypto_verify.go — REAL cryptographic verification for WayChain precompiles.

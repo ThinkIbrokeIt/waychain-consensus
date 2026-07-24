@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Test P2P tx broadcast — submit a tx and verify it reaches peers."""
 import json, struct, hashlib, time, urllib.request
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey

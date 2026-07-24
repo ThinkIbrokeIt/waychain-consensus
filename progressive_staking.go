@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package main
 
 import (
 	"fmt"
 	"math"
+
+	"github.com/ThinkIbrokeIt/waychain-consensus/evm"
 )
 
 // ══════════════════════════════════════════════════════════════════════
@@ -48,7 +51,17 @@ const WAYTotalSupply uint64 = 100_000_000
 
 // Default emission: 7% of total supply minted per year to validators,
 // split by the progressive (anti-whale) brackets defined above.
-const DefaultAnnualInflationPct = 7.0
+// (Default value now lives in the evm package as evm.DefaultAnnualInflationPct;
+// this alias keeps existing references working.)
+const DefaultAnnualInflationPct = evm.DefaultAnnualInflationPct
+
+// QuestTreasurySharePct: fraction of the 7% annual emission routed to the
+// quest treasury (precompile 0x03) instead of validators. Auto-replenishes the
+// quest budget so there are always funds for new users (#71). 15 => ~1.05M WAY/yr
+// to 0x03 (matches the 1.1M budget intent). Founder-tunable; governance hook is
+// a follow-up. The 5%-of-live-supply quest CAP (QuestCap) already scales with
+// inflation, so this share funds the treasury under that cap.
+const QuestTreasurySharePct = 15
 
 // Default block time (seconds) — matches consensus.go ConsensusTimeout feel.
 // Drives per-block reward granularity. Change here to retune chain cadence.
@@ -77,8 +90,10 @@ type ProgressiveStaking struct {
 // (pass consensus.EpochLength so the 7% cap holds regardless of block cadence).
 func NewProgressiveStaking(annualInflationPct, blockTimeSec float64, epochLength uint64) *ProgressiveStaking {
 	if annualInflationPct <= 0 {
-		annualInflationPct = DefaultAnnualInflationPct
+		annualInflationPct = evm.DefaultAnnualInflationPct
 	}
+	// Seed the protocol-wide inflation rate (governance-mutable, bounded 3–9%).
+	evm.SetInflationPct(annualInflationPct)
 	if blockTimeSec <= 0 {
 		blockTimeSec = DefaultBlockTimeSec
 	}
@@ -94,13 +109,19 @@ func NewProgressiveStaking(annualInflationPct, blockTimeSec float64, epochLength
 // (7% of total supply by default). This is the anchor the whole model
 // was designed around and had been flattened into a magic per-block number.
 func (ps *ProgressiveStaking) AnnualEmission() uint64 {
-	return uint64(float64(WAYTotalSupply) * ps.AnnualInflationPct / 100.0)
+	return uint64(float64(WAYTotalSupply) * evm.GetInflationPct() / 100.0)
 }
 
 // PerBlockEmission returns the exact (fractional) WAY owed validators this block,
 // anchored to the annual emission and the configured block time.
 func (ps *ProgressiveStaking) PerBlockEmission() float64 {
 	return float64(ps.AnnualEmission()) / blocksPerYear(ps.BlockTimeSec)
+}
+
+// TreasuryShareOf returns the portion of a minted amount that routes to the
+// quest treasury (0x03) instead of validators, per QuestTreasurySharePct (#71).
+func TreasuryShareOf(amount uint64) uint64 {
+	return amount * QuestTreasurySharePct / 100
 }
 
 // EpochCap returns the max tokens allowed to be minted in one epoch.

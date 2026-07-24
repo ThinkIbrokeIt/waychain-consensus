@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 package evm
 
 // #cgo LDFLAGS: -L${SRCDIR}/../revm-ffi/target/release -lrevm_ffi -ldl -lm
